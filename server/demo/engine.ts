@@ -56,8 +56,21 @@ export function handleDemo(req: DemoRequest): any {
   const path = endpoint.path;
   const table = (state.tables[path] ||= []);
 
+  // RouterOS also addresses a single entry through the URL — PATCH/DELETE
+  // /rest/ip/address/*3 — so honour that form alongside .id/numbers in the body.
+  const itemSegment = commandPath && !hasCommand(endpoint, commandPath) && !commandPath.includes('/')
+    ? decodeURIComponent(commandPath)
+    : '';
+  const itemTarget = itemSegment ? itemSelector(table, itemSegment) : null;
+  const body: Row = itemTarget ? { ...req.body, numbers: undefined, ...itemTarget } : req.body;
+
   if (req.method === 'GET') {
     tick(path, table);
+    if (itemTarget) {
+      const found = matchRows(table, itemTarget)[0];
+      if (!found) throw new DemoError('notfound', 'Entry not found.', 404);
+      return [found];
+    }
     let rows = applyQuery(table, req.query);
     if (endpoint.kind === 'singleton' && rows.length === 0) rows = [{}];
     return rows;
@@ -90,9 +103,9 @@ export function handleDemo(req: DemoRequest): any {
     // Singletons (settings menus) have a single unnamed row.
     const targets = endpoint.kind === 'singleton'
       ? (table.length ? table : (table.push({ '.id': '*1' }), table))
-      : matchRows(table, req.body);
+      : matchRows(table, body);
     if (!targets.length) throw new DemoError('notfound', 'Entry not found.', 404);
-    const patch = { ...req.body };
+    const patch = { ...body };
     delete patch['.id']; delete patch.numbers; delete patch.number;
     for (const row of targets) Object.assign(row, patch);
     pushLog('system,info', `dashboard: updated /${path} (${describe(patch)})`);
@@ -100,7 +113,7 @@ export function handleDemo(req: DemoRequest): any {
   }
 
   if (req.method === 'DELETE') {
-    const targets = matchRows(table, req.query.has('id') ? { '.id': req.query.get('id') } : req.body);
+    const targets = matchRows(table, req.query.has('id') ? { '.id': req.query.get('id') } : body);
     if (!targets.length) throw new DemoError('notfound', 'Entry not found.', 404);
     for (const row of targets) {
       const i = table.indexOf(row);
@@ -131,6 +144,18 @@ function applyQuery(rows: Row[], query: URLSearchParams): Row[] {
     out = out.filter((r) => String(r[key] ?? '') === value || (value === 'true' && r[key] === true) || (value === 'false' && r[key] === false));
   }
   return out.map((r) => ({ ...r }));
+}
+
+/** Resolve `/rest/<menu>/<segment>` item addressing (`*id`, index or unique name) to a target spec. */
+function itemSelector(table: Row[], segment: string): Row | null {
+  if (!segment) return null;
+  if (segment.startsWith('*')) return { '.id': segment };
+  if (/^\d+$/.test(segment)) {
+    const row = table[Number(segment)];
+    if (row) return { '.id': String(row['.id']) };
+  }
+  const named = table.find((r) => String(r.name ?? '') === segment || String(r.interface ?? '') === segment);
+  return named ? { '.id': String(named['.id']) } : null;
 }
 
 export function matchRows(table: Row[], spec: Row = {}): Row[] {

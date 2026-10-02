@@ -15,7 +15,6 @@ import { CommandModal } from '../components/CommandRunner';
 import { JsonView, ResultView } from '../components/JsonView';
 import { Badge, Button, Card, Drawer, EmptyState, Icon, Modal, Segmented, Spinner, TableSkeleton, toast, useDebounced } from '../components/ui';
 
-const Badge1 = Badge;
 
 /* ------------------------------------------------------------------ *
  * Page shell
@@ -125,6 +124,18 @@ const ErrorPanel: React.FC<{ error: unknown; onRetry: () => void; path: string }
 };
 
 /* ------------------------------------------------------------------ *
+ * Shared helpers
+ * ------------------------------------------------------------------ */
+
+/** RouterOS addresses single entries as /rest/<menu>/<.id>; falls back to the collection + body form. */
+function itemTarget(path: string, row: Row): [string, Row] {
+  const id = row['.id'];
+  if (!id) return [path, row];
+  const { ['.id']: _drop, ...rest } = row;
+  return [`${path}/${id}`, rest as Row];
+}
+
+/* ------------------------------------------------------------------ *
  * List endpoints
  * ------------------------------------------------------------------ */
 
@@ -158,7 +169,7 @@ const ListEndpoint: React.FC<{ ep: EndpointDef }> = ({ ep }) => {
     return rows.filter((r) => JSON.stringify(r).toLowerCase().includes(q));
   }, [rows, debounced]);
 
-  const invalidate = () => qc.invalidateQueries({ queryKey });
+const invalidate = () => qc.invalidateQueries({ queryKey });
 
   const createMutation = useMutation({
     mutationFn: (values: Row) => api.create(ep.path, values),
@@ -167,13 +178,13 @@ const ListEndpoint: React.FC<{ ep: EndpointDef }> = ({ ep }) => {
   });
 
   const updateMutation = useMutation({
-    mutationFn: ({ values }: { values: Row }) => api.update(ep.path, values),
+    mutationFn: ({ values }: { values: Row }) => api.update(...itemTarget(ep.path, values)),
     onSuccess: () => { invalidate(); setEditing(null); toast.success('Changes applied'); },
     onError: (err: ApiError) => toast.error('Update failed', err.message, err.hint),
   });
 
   const removeMutation = useMutation({
-    mutationFn: (ids: string[]) => api.remove(ep.path, ids.length === 1 ? { '.id': ids[0] } : { numbers: ids }),
+    mutationFn: (ids: string[]) => (ids.length === 1 ? api.remove(`${ep.path}/${ids[0]}`, {}) : api.remove(ep.path, { numbers: ids })),
     onSuccess: (_r, ids) => { invalidate(); setSelected([]); setDetail(null); toast.success(`Removed ${ids.length} entr${ids.length === 1 ? 'y' : 'ies'}`); },
     onError: (err: ApiError) => toast.error('Delete failed', err.message, err.hint),
   });
@@ -607,4 +618,3 @@ const EndpointPage: React.FC = () => {
 };
 
 export default EndpointPage;
-export { Badge1 };

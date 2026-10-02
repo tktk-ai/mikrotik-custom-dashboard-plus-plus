@@ -116,8 +116,28 @@ scripts/gen-icons.mjs Regenerates the tree-shakeable lucide icon registry after 
 | `npm run build` | Production bundle into `dist/` |
 | `npm start` / `npm run serve` | Serve API + built UI (serve = build then start) |
 | `npm run typecheck` | `tsc --noEmit` over server, shared, scripts and UI |
-| `npm run smoke` | Boots jsdom + Vite and renders 26 routes against the running API, asserting real data (needs `npm run dev:api`) |
+| `npm run smoke` | Renders the real app inside jsdom across 27 routes against the running API, asserting live data and zero console errors (needs `npm run dev:api`) |
 | `node scripts/gen-icons.mjs` | Rebuild `src/components/iconRegistry.tsx` (explicit icon imports — keeps the main bundle ~124 kB gzipped instead of ~250 kB) |
+
+## Verification
+
+```bash
+npm run typecheck   # tsc --noEmit, strict
+npm run build       # production bundle
+npm run smoke       # needs the API running: npm run dev:api (demo device is fine)
+```
+
+The smoke test boots the actual `App` (shell, router, lazy pages, react-query) in jsdom, visits 27 routes — every
+page type plus list, singleton, command and unknown-menu endpoints — and fails if a route paints no data, hits an
+error state, or logs a console error/warning:
+
+```
+[ ok ] /                           6762 chars
+[ ok ] /m/ip/firewall/filter       5301 chars
+[ ok ] /m/tool/ping                4154 chars
+...
+27/27 routes rendered cleanly.
+```
 
 ## Security notes
 
