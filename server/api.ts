@@ -2,6 +2,14 @@ import express, { type Request, type Response } from 'express';
 import { getEndpoint } from '../shared/catalog';
 import type { Row } from '../shared/types';
 import { DemoError, getDeviceInfo, getMetrics, handleDemo, listEndpointPaths, pushLog, resetDemo, resolveEndpoint } from './demo/engine';
+import {
+  INSIGHT_PATHS, TOPOLOGY_PATHS, TRAFFIC_PATHS, fetchPaths, reports, toTables,
+} from './analytics/collect';
+import { buildTopology } from './analytics/topology';
+import { buildInsights } from './analytics/insights';
+import { buildTraffic } from './analytics/traffic';
+import { isRandomisedMac, vendorForMac } from '../shared/oui';
+import { resetSnapshots } from './analytics/snapshot';
 import { RosError, normalizeList, rosRequest } from './routeros';
 import { clearCapabilities, getCapabilities, testConnection } from './probe';
 import {
@@ -26,6 +34,7 @@ router.get('/health', (_req, res) => {
     mode: conn?.demo ? 'demo' : 'live',
     connection: conn ? publicConnection(conn) : null,
     endpoints: listEndpointPaths().length,
+    analytics: { insightPaths: INSIGHT_PATHS.length, topologyPaths: TOPOLOGY_PATHS.length, trafficPaths: TRAFFIC_PATHS.length },
     uptime: process.uptime(),
     node: process.version,
   });
@@ -178,6 +187,156 @@ router.get('/stream', async (req, res) => {
   req.on('close', () => { clearInterval(interval); clearInterval(keepAlive); res.end(); });
 });
 
+/* --------------------------- analytics ---------------------------- */
+
+const activeKey = () => getActiveConnection()?.id ?? 'none';
+const analyticsMode = () => (getActiveConnection()?.demo ? 'demo' : 'live');
+
+router.get('/topology', async (_req, res) => {
+  const conn = getActiveConnection();
+  if (!conn) return fail(res, 400, 'validation', 'No device connection configured.');
+  try {
+    const fetched = await fetchPaths([...TOPOLOGY_PATHS]);
+    ok(res, buildTopology(fetched, analyticsMode()));
+  } catch (err) {
+    sendError(res, err);
+  }
+});
+
+router.get('/insights', async (req, res) => {
+  const conn = getActiveConnection();
+  if (!conn) return fail(res, 400, 'validation', 'No device connection configured.');
+  try {
+    const fetched = await fetchPaths([...INSIGHT_PATHS]);
+    const includeTraffic = req.query.traffic === 'true';
+    ok(res, buildInsights(fetched, analyticsMode(), includeTraffic, activeKey()));
+  } catch (err) {
+    sendError(res, err);
+  }
+});
+
+router.get('/traffic', async (_req, res) => {
+  const conn = getActiveConnection();
+  if (!conn) return fail(res, 400, 'validation', 'No device connection configured.');
+  try {
+    const fetched = await fetchPaths([...TRAFFIC_PATHS]);
+    ok(res, buildTraffic(fetched, analyticsMode()));
+  } catch (err) {
+    sendError(res, err);
+  }
+});
+
+/** Snapshot the current configuration so the next /insights call can diff it. */
+router.post('/insights/snapshot', async (_req, res) => {
+  const conn = getActiveConnection();
+  if (!conn) return fail(res, 400, 'validation', 'No device connection configured.');
+  try {
+    const fetched = await fetchPaths([...INSIGHT_PATHS]);
+    ok(res, buildInsights(fetched, analyticsMode(), false, activeKey()));
+  } catch (err) {
+    sendError(res, err);
+  }
+});
+
+/** Best-effort "who is this device" probe using routing tools. */
+router.get('/device/:ip', async (req, res) => {
+  const conn = getActiveConnection();
+  if (!conn) return fail(res, 400, 'validation', 'No device connection configured.');
+  const ip = String(req.params.ip ?? '').trim();
+  if (!/^[0-9a-fA-F:.]+$/.test(ip)) return fail(res, 400, 'validation', 'Provide an IP address.');
+  try {
+    const [arp, neighbors, leases, dns, ipv6] = await Promise.all([
+      fetchPaths(['ip/arp']).then((m) => m.get('ip/arp')),
+      fetchPaths(['ip/neighbor']).then((m) => m.get('ip/neighbor')),
+      fetchPaths(['ip/dhcp-server/lease']).then((m) => m.get('ip/dhcp-server/lease')),
+      fetchPaths(['ip/dns']).then((m) => m.get('ip/dns')),
+      fetchPaths(['ipv6/neighbor']).then((m) => m.get('ipv6/neighbor')),
+    ]);
+    const match = (rows: Row[] = []) => rows.filter((r) => String(r.address ?? '') === ip || String(r['last-ip'] ?? '') === ip);
+    const table = {
+      arp: match(arp?.rows), neighbors: match(neighbors?.rows), leases: match(leases?.rows), ipv6: match(ipv6?.rows),
+    } as Record<string, Row[]>;
+    const known = [...table.arp, ...table.neighbors, ...table.leases];
+    const mac = known.map((r) => String(r['mac-address'] ?? '')).find(Boolean);
+    const name = known.map((r) => String(r['host-name'] ?? r.identity ?? '')).find(Boolean);
+
+    // Probe tooling: ping (always) plus a reverse lookup when configured.
+    const ping = await fetchPathProbe(ip, conn);
+    const reverse = await reverseLookup(ip, String((dns?.rows?.[0]?.servers ?? '').split(',')[0] ?? ''), conn);
+
+    ok(res, {
+      ip,
+      name,
+      mac,
+      vendor: mac ? vendorForMac(mac) : undefined,
+      randomised: mac ? isRandomisedMac(mac) : undefined,
+      platform: table.neighbors[0]?.platform,
+      board: table.neighbors[0]?.board,
+      version: table.neighbors[0]?.version,
+      discoveredBy: table.neighbors[0]?.['discovered-by'],
+      interface: known.map((r) => String(r.interface ?? '')).find(Boolean),
+      hostname: table.leases[0]?.['host-name'],
+      dhcp: table.leases.length > 0,
+      status: table.leases[0]?.status,
+      ipv6: table.ipv6.map((r) => r.address),
+      neighbours: table.neighbors.length,
+      evidence: [
+        table.leases.length ? `DHCP lease${table.leases.length > 1 ? 's' : ''}: ${table.leases.length}` : null,
+        table.arp.length ? 'ARP entry' : null,
+        table.neighbors.length ? `Neighbour discovery (${table.neighbors[0]?.['discovered-by'] ?? 'mndp'})` : null,
+      ].filter(Boolean),
+      ping,
+      reverse,
+      sources: [arp, neighbors, leases, ipv6].filter(Boolean).map((f) => ({ path: f!.path, ok: f!.ok, rows: f!.rows.length, error: f!.error })),
+    });
+  } catch (err) {
+    sendError(res, err);
+  }
+});
+
+const fetchPathProbe = async (ip: string, conn: NonNullable<ReturnType<typeof getActiveConnection>>) => {
+  try {
+    if (conn.demo) {
+      const rows = handleDemo({ method: 'POST', path: 'tool/ping', body: { address: ip, count: 3 }, query: new URLSearchParams() });
+      const list = Array.isArray(rows) ? rows : [rows];
+      const times = list.map((r: Row) => Number(String(r.time ?? '').replace(/[^0-9.]/g, ''))).filter((n) => Number.isFinite(n) && n > 0);
+      return {
+        ok: list.some((r: Row) => String(r.status ?? '').includes('ok') || r.seq !== undefined),
+        sent: list.filter((r: Row) => r.seq !== undefined && r.seq !== 'complete').length,
+        avgMs: times.length ? Math.round((times.reduce((a, b) => a + b, 0) / times.length) * 100) / 100 : null,
+        raw: list.slice(0, 6),
+      };
+    }
+    const result = await rosRequest(conn, 'tool/ping', 'POST', { address: ip, count: '3' });
+    const rows = normalizeList(result.data);
+    const times = rows.map((r) => Number(String(r.time ?? '').replace(/[^0-9.]/g, ''))).filter((n) => Number.isFinite(n) && n > 0);
+    return {
+      ok: rows.some((r) => r.seq !== undefined && r.seq !== 'complete'),
+      sent: rows.filter((r) => r.seq !== undefined && r.seq !== 'complete').length,
+      avgMs: times.length ? Math.round((times.reduce((a, b) => a + b, 0) / times.length) * 100) / 100 : null,
+      raw: rows.slice(0, 6),
+    };
+  } catch (err) {
+    return { ok: false, error: err instanceof RosError ? err.message : (err as Error).message, sent: 0, avgMs: null as number | null, raw: [] as Row[] };
+  }
+};
+
+/** Reverse DNS via the router itself (/tool dns-lookup reverse), when available. */
+const reverseLookup = async (ip: string, server: string, conn: NonNullable<ReturnType<typeof getActiveConnection>>) => {
+  try {
+    const body = { address: ip, ...(server ? { server } : {}), 'type': 'A' };
+    if (conn.demo) {
+      const rows = handleDemo({ method: 'POST', path: 'tool/dns-lookup', body, query: new URLSearchParams() });
+      const list = Array.isArray(rows) ? rows : [rows];
+      return { ok: true, answers: list.map((r: Row) => String(r.address ?? r.name ?? '')).filter(Boolean).slice(0, 5) };
+    }
+    const result = await rosRequest(conn, 'tool/dns-lookup', 'POST', body);
+    return { ok: true, answers: normalizeList(result.data).map((r) => String(r.address ?? r.name ?? '')).filter(Boolean).slice(0, 5) };
+  } catch (err) {
+    return { ok: false, error: err instanceof RosError ? err.message : (err as Error).message, answers: [] as string[] };
+  }
+};
+
 /* --------------------------- REST proxy --------------------------- */
 
 const proxyRos = async (req: Request, res: Response) => {
@@ -240,6 +399,7 @@ router.post('/console', async (req, res) => {
 
 router.post('/demo/reset', (_req, res) => {
   resetDemo();
+  resetSnapshots();
   pushLog('system,info', 'demo device reset from dashboard');
   ok(res, { reset: true });
 });

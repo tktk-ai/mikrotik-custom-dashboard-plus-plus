@@ -8,6 +8,10 @@ import { REFRESH_OPTIONS, useApp } from '../lib/store';
 import { Badge, Button, Icon, Segmented, toast, useToggle } from './ui';
 
 const QUICK_ACTIONS = [
+  { id: 'map', label: 'Network map', path: '/topology', icon: 'Waypoints' },
+  { id: 'devices', label: 'Device inventory', path: '/devices', icon: 'MonitorSmartphone' },
+  { id: 'insights', label: 'Insights & findings', path: '/insights', icon: 'Gauge' },
+  { id: 'traffic', label: 'Traffic & DPI', path: '/traffic', icon: 'Activity' },
   { id: 'ping', label: 'Ping a host', path: '/m/tool/ping', icon: 'Radio' },
   { id: 'trace', label: 'Traceroute', path: '/m/tool/traceroute', icon: 'Route' },
   { id: 'torch', label: 'Torch interface', path: '/m/tool/torch', icon: 'Flame' },
@@ -103,6 +107,24 @@ const Sidebar: React.FC<{ open: boolean; onClose: () => void }> = ({ open, onClo
             <Icon name="LayoutDashboard" size={15} />
             <span className="flex-1">Overview</span>
           </NavLink>
+          <NavLink to="/topology" className={({ isActive }) => clsx('nav-item', isActive && 'nav-item-active')}>
+            <Icon name="Waypoints" size={15} />
+            <span className="flex-1">Network map</span>
+            <span className="chip chip-neutral px-1 py-0 text-[10px]">live</span>
+          </NavLink>
+          <NavLink to="/devices" className={({ isActive }) => clsx('nav-item', isActive && 'nav-item-active')}>
+            <Icon name="MonitorSmartphone" size={15} />
+            <span className="flex-1">Devices</span>
+          </NavLink>
+          <NavLink to="/insights" className={({ isActive }) => clsx('nav-item', isActive && 'nav-item-active')}>
+            <Icon name="Gauge" size={15} />
+            <span className="flex-1">Insights</span>
+          </NavLink>
+          <NavLink to="/traffic" className={({ isActive }) => clsx('nav-item', isActive && 'nav-item-active')}>
+            <Icon name="Activity" size={15} />
+            <span className="flex-1">Traffic &amp; DPI</span>
+          </NavLink>
+          <div className="my-2 border-t border-line/60" />
           <NavLink to="/explorer" className={({ isActive }) => clsx('nav-item', isActive && 'nav-item-active')}>
             <Icon name="Compass" size={15} />
             <span className="flex-1">API explorer</span>

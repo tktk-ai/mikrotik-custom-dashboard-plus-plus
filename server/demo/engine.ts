@@ -65,6 +65,18 @@ export function handleDemo(req: DemoRequest): any {
   const body: Row = itemTarget ? { ...req.body, numbers: undefined, ...itemTarget } : req.body;
 
   if (req.method === 'GET') {
+    // A GET on an unknown sub-path must not silently return the parent table.
+    if (commandPath && !itemTarget) {
+      const child = ENDPOINTS.find((e) => e.path === `${path}/${commandPath}`);
+      if (!child) {
+        throw new DemoError(
+          'unsupported',
+          `\`/${req.path}\` is not a menu on this device.`,
+          404,
+          `The closest catalogued menu is /${path}.`,
+        );
+      }
+    }
     tick(path, table);
     if (itemTarget) {
       const found = matchRows(table, itemTarget)[0];

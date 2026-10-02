@@ -388,6 +388,9 @@ export const ipEndpoints: EndpointDef[] = [
     fields: [NAME, S('type', { key: true }), S('data', { key: true, mono: true }), D('ttl', { key: true }), S('address'), S('status', { key: true })],
     commands: [{ id: 'flush', label: 'Flush cache', icon: 'Trash2', path: 'flush', target: 'none', danger: true, confirm: 'Flush the entire DNS cache?' }],
   },
+  { path: 'ip/dhcp-server/alert', label: 'DHCP Alerts', category: 'ip', group: 'DHCP', readOnly: true, icon: 'TriangleAlert', demoRows: 1,
+    description: 'Rogue DHCP servers detected on the LAN. RouterOS raises these automatically when another server answers DHCP on a monitored interface.',
+    fields: [S('address', { key: true, mono: true }), S('mac-address', { mono: true }), S('interface', { key: true }), S('server-name'), S('valid-time'), S('alert-timeout'), COMMENT] },
   { path: 'ip/pool', label: 'IP Pools', category: 'ip', group: 'Addressing', key: true, icon: 'Boxes', demoRows: 3,
     fields: [NAME, S('ranges', { key: true, mono: true, required: true, placeholder: '192.168.88.10-192.168.88.200' }), COMMENT] },
   {

@@ -34,8 +34,22 @@ export function hex(r: Rnd, len: number): string {
 }
 
 export function mac(r: Rnd): string {
-  const oui = ['74:4D:28', 'DC:2C:6E', '48:8F:5A', 'E4:8D:8C', '2C:C8:1B', '18:FD:74', '64:D1:54', 'CC:2D:E0'];
+  // Mixed vendor pool: MikroTik plus the OUIs of the consumer/enterprise gear that
+  // normally shows up behind a router, so vendor lookup has realistic input.
+  const oui = [
+    '74:4D:28', 'DC:2C:6E', '48:8F:5A', 'E4:8D:8C', '2C:C8:1B', '18:FD:74', '64:D1:54',
+    '3C:22:FB', 'F0:18:98', 'A4:83:E7', '8C:77:12', '5C:0A:5B',
+    '3C:97:0E', '00:1B:21', '34:23:BA', '24:0A:C4', '5C:CF:7F', '84:F3:EB',
+    '24:A4:3C', 'F0:9F:C2', '5C:AA:FD', 'AC:3A:7A', '44:65:0D', '18:B4:30',
+    '50:C7:BF', '9C:3D:CF', 'B8:27:EB', 'DC:A6:32', '00:11:32', '3C:D9:2B',
+    '44:19:B6', '90:02:A9', '80:5E:C0', '00:04:F2',
+  ];
   return `${pick(oui, r)}:${hex(r, 2).toUpperCase()}:${hex(r, 2).toUpperCase()}:${hex(r, 2).toUpperCase()}`;
+}
+
+/** MAC under a given OUI (`3C:22:FB`) — keeps the demo inventory brand-coherent. */
+export function macFrom(oui: string, r: Rnd): string {
+  return `${oui}:${hex(r, 2).toUpperCase()}:${hex(r, 2).toUpperCase()}:${hex(r, 2).toUpperCase()}`;
 }
 
 export function ip4(r: Rnd, subnet = '192.168.88'): string {

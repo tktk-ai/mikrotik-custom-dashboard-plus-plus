@@ -8,6 +8,10 @@ import Dashboard from './pages/Dashboard';
 // module is fetched on demand (the catalog-driven pages pull in the whole
 // endpoint catalogue, which is worth splitting out).
 const EndpointPage = lazy(() => import('./pages/Endpoint'));
+const TopologyPage = lazy(() => import('./pages/Topology'));
+const DevicesPage = lazy(() => import('./pages/Devices'));
+const InsightsPage = lazy(() => import('./pages/Insights'));
+const TrafficPage = lazy(() => import('./pages/Traffic'));
 const Explorer = lazy(() => import('./pages/Explorer'));
 const Connections = lazy(() => import('./pages/Connections'));
 const Console = lazy(() => import('./pages/Console'));
@@ -38,6 +42,10 @@ const App: React.FC = () => (
         <Routes>
           <Route path="/" element={<Dashboard />} />
           <Route path="/m/*" element={<EndpointPage />} />
+          <Route path="/topology" element={<TopologyPage />} />
+          <Route path="/devices" element={<DevicesPage />} />
+          <Route path="/insights" element={<InsightsPage />} />
+          <Route path="/traffic" element={<TrafficPage />} />
           <Route path="/explorer" element={<Explorer />} />
           <Route path="/connections" element={<Connections />} />
           <Route path="/console" element={<Console />} />

@@ -1,5 +1,6 @@
 /** Typed client for the dashboard's own HTTP API. */
 
+import type { InsightBundle, Topology, TrafficBundle } from '@shared/analytics';
 import type { Row } from '@shared/types';
 
 export interface ApiFailure {
@@ -85,6 +86,29 @@ export interface Capabilities {
   summary: { supported: number; unsupported: number; failed: number };
 }
 
+/** Result of the on-demand "what is this device?" probe. */
+export interface DeviceProbe {
+  ip: string;
+  name?: string;
+  mac?: string;
+  vendor?: string;
+  randomised?: boolean;
+  platform?: string;
+  board?: string;
+  version?: string;
+  discoveredBy?: string;
+  interface?: string;
+  hostname?: string;
+  dhcp: boolean;
+  status?: string;
+  ipv6: string[];
+  neighbours: number;
+  evidence: string[];
+  ping: { ok: boolean; sent: number; avgMs: number | null; error?: string; raw: Row[] };
+  reverse: { ok: boolean; answers: string[]; error?: string };
+  sources: Array<{ path: string; ok: boolean; rows: number; error?: string }>;
+}
+
 export interface TestResult { ok: boolean; latencyMs?: number; identity?: string; board?: string; note?: string; error?: string; kind?: string; hint?: string; detail?: string }
 
 const buildQuery = (params?: Record<string, string | number | boolean | undefined>) => {
@@ -123,6 +147,11 @@ export const api = {
   command: (path: string, body: Row) => request<RosResult>(`/api/ros/${path}`, { method: 'POST', body: JSON.stringify(body) }),
 
   console: (script: string) => request<RosResult>(`/api/console`, { method: 'POST', body: JSON.stringify({ script }) }),
+
+  topology: () => request<Topology>('/api/topology'),
+  insights: (includeTraffic = false) => request<InsightBundle>(`/api/insights${includeTraffic ? '?traffic=true' : ''}`),
+  traffic: () => request<TrafficBundle>('/api/traffic'),
+  probeDevice: (ip: string) => request<DeviceProbe>(`/api/device/${encodeURIComponent(ip)}`),
   resetDemo: () => request<{ reset: boolean }>('/api/demo/reset', { method: 'POST' }),
 };
 

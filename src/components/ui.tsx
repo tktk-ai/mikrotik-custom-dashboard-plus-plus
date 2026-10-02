@@ -6,8 +6,15 @@ import clsx from 'clsx';
  * Primitives
  * ------------------------------------------------------------------ */
 
-export const Icon: React.FC<{ name?: string; className?: string; size?: number; strokeWidth?: number }> = ({ name, className, size = 16, strokeWidth = 2 }) => {
+export const Icon: React.FC<{ name?: string; className?: string; size?: number; strokeWidth?: number; title?: string }> = ({ name, className, size = 16, strokeWidth = 2, title }) => {
   const Cmp = (name ? (LucideIcons as unknown as Record<string, React.ComponentType<any>>)[name] : null) ?? LucideIcons.Dot;
+  if (title) {
+    return (
+      <span title={title} className={clsx('inline-flex shrink-0 items-center', className)}>
+        <Cmp size={size} strokeWidth={strokeWidth} />
+      </span>
+    );
+  }
   return <Cmp size={size} strokeWidth={strokeWidth} className={className} />;
 };
 

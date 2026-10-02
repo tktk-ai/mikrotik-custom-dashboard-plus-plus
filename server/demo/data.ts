@@ -1,6 +1,6 @@
 import { ENDPOINTS } from '../../shared/catalog';
 import type { EndpointDef, FieldDef, Row } from '../../shared/types';
-import { chance, duration, hex, hash, int, mac, pick, rng, routerosDate, timeString, dateTimeString, type Rnd } from './random';
+import { chance, duration, hex, hash, int, mac, macFrom, pick, rng, routerosDate, timeString, dateTimeString, type Rnd } from './random';
 
 /**
  * Hand-written demo data for the "hero" menus plus a metadata-driven generator that
@@ -22,7 +22,51 @@ const WAN = '100.64.12';
 
 const people = ['ama', 'kofi', 'yaw', 'nadia', 'sam', 'chris', 'lena', 'tunde', 'maya', 'raul', 'sara', 'ibrahim', 'grace', 'peter', 'nina', 'omar'];
 const hosts = ['iphone', 'galaxy-s23', 'macbook-pro', 'thinkpad', 'tv-lg', 'ps5', 'printer-hp', 'nest-thermostat', 'ipad-air', 'raspberrypi', 'xbox', 'cctv-dvr', 'echo-dot', 'desktop-win', 'pixel-8', 'roku'];
+/** Hand-authored discovered neighbours — the address/MAC/name authority for the demo LAN. */
+const FLEET: Array<{
+  name: string; mac: string; ip: string; platform: string; board: string; version: string;
+  iface: string; by: string; age: number; link: 'wired' | 'wifi';
+}> = [
+  { name: 'core-sw-01', mac: '2C:3F:38:11:22:01', ip: '172.16.10.20', platform: 'Cisco', board: 'SG350-28', version: 'IOS 15.2.1', iface: 'vlan10', by: 'cdp', age: 1200000, link: 'wired' },
+  { name: 'dist-sw-02', mac: '00:1B:0C:AA:11:02', ip: `${LAN}.21`, platform: 'Cisco', board: 'Catalyst 2960X', version: 'IOS 15.2(7)E', iface: 'bridge1', by: 'cdp', age: 900000, link: 'wired' },
+  { name: 'ap-office', mac: '24:A4:3C:55:0A:01', ip: `${LAN}.22`, platform: 'Ubiquiti', board: 'U6-Pro', version: '6.6.65', iface: 'bridge1', by: 'lldp', age: 860000, link: 'wired' },
+  { name: 'ap-lobby', mac: '24:A4:3C:55:0A:02', ip: `${LAN}.23`, platform: 'Ubiquiti', board: 'U6-Lite', version: '6.6.65', iface: 'bridge1', by: 'lldp', age: 860000, link: 'wired' },
+  { name: 'edge-ap-guest', mac: '6C:F3:7F:0B:01:10', ip: `${LAN}.24`, platform: 'Aruba', board: 'AP-515', version: 'ArubaOS 8.10', iface: 'bridge-guest', by: 'lldp', age: 700000, link: 'wired' },
+  { name: 'nas-01', mac: '00:11:32:7A:B1:01', ip: `${LAN}.30`, platform: 'Synology', board: 'DS920+', version: 'DSM 7.2.2', iface: 'bridge1', by: 'lldp', age: 1100000, link: 'wired' },
+  { name: 'srv-proxmox-01', mac: '18:66:DA:0F:33:01', ip: '172.16.10.40', platform: 'Dell', board: 'PowerEdge R650', version: 'Proxmox VE 8.2', iface: 'vlan10', by: 'lldp', age: 1100000, link: 'wired' },
+  { name: 'cctv-nvr', mac: '44:19:B6:9A:01:01', ip: `${LAN}.40`, platform: 'Hikvision', board: 'DS-7608NXI', version: 'V4.30.085', iface: 'bridge1', by: 'mndp', age: 800000, link: 'wired' },
+  { name: 'cam-gate-east', mac: '44:19:B6:9A:01:52', ip: `${LAN}.41`, platform: 'Hikvision', board: 'DS-2CD2386G2', version: 'V5.7.15', iface: 'bridge1', by: 'mndp', age: 500000, link: 'wired' },
+  { name: 'cam-lobby', mac: '90:02:A9:3C:01:11', ip: `${LAN}.42`, platform: 'Dahua', board: 'IPC-HDW3849', version: 'V3.120', iface: 'bridge1', by: 'mndp', age: 500000, link: 'wired' },
+  { name: 'printer-ops', mac: '9C:B6:54:44:20:01', ip: `${LAN}.50`, platform: 'HP', board: 'LaserJet M428', version: '20240612', iface: 'bridge1', by: 'lldp', age: 600000, link: 'wired' },
+  { name: 'phone-reception', mac: '80:5E:C0:12:01:01', ip: `${LAN}.60`, platform: 'Yealink', board: 'SIP-T54W', version: '96.86.0.75', iface: 'bridge1', by: 'lldp', age: 640000, link: 'wired' },
+  { name: 'pi-monitor', mac: 'B8:27:EB:AB:CD:01', ip: `${LAN}.61`, platform: 'Raspberry Pi', board: 'Raspberry Pi 4B', version: 'Raspberry Pi OS 12', iface: 'bridge1', by: 'mndp', age: 900000, link: 'wired' },
+  { name: 'iot-gateway', mac: '24:0A:C4:5E:01:01', ip: `${LAN}.70`, platform: 'Espressif', board: 'ESP32-GW', version: 'Tasmota 14.1', iface: 'bridge1', by: 'mndp', age: 300000, link: 'wifi' },
+  { name: 'macbook-ama', mac: '3C:22:FB:1A:2B:01', ip: `${LAN}.101`, platform: 'macOS', board: 'MacBook Pro 14', version: 'Sonoma 14.6', iface: 'bridge1', by: 'mndp', age: 12000, link: 'wifi' },
+  { name: 'iphone-kofi', mac: 'F0:18:98:33:44:01', ip: `${LAN}.102`, platform: 'iOS', board: 'iPhone 15 Pro', version: 'iOS 18.1', iface: 'bridge1', by: 'mndp', age: 4000, link: 'wifi' },
+  { name: 'thinkpad-yaw', mac: '00:09:6B:77:88:01', ip: `${LAN}.103`, platform: 'Windows', board: 'ThinkPad T14', version: 'Windows 11 23H2', iface: 'bridge1', by: 'mndp', age: 30000, link: 'wired' },
+  { name: 'roku-lounge', mac: 'AC:3A:7A:6B:0C:01', ip: `${LAN}.106`, platform: 'RokuOS', board: 'Roku Streaming Stick', version: '12.5', iface: 'bridge1', by: 'mndp', age: 60000, link: 'wifi' },
+  { name: 'echo-dot-hall', mac: '44:65:0D:2F:3A:01', ip: `${LAN}.105`, platform: 'Amazon', board: 'Echo Dot 5', version: 'FireOS 7', iface: 'bridge1', by: 'mndp', age: 90000, link: 'wifi' },
+  { name: 'sonos-kitchen', mac: '5C:AA:FD:11:22:01', ip: `${LAN}.107`, platform: 'Sonos', board: 'Sonos One SL', version: 'S2 16.2', iface: 'bridge1', by: 'mndp', age: 150000, link: 'wifi' },
+  { name: 'pixel-8-omar', mac: '3C:5A:B4:99:88:01', ip: `${GUEST}.121`, platform: 'Android', board: 'Pixel 8', version: 'Android 15', iface: 'bridge-guest', by: 'mndp', age: 20000, link: 'wifi' },
+  { name: 'galaxy-nadia', mac: '8C:77:12:99:AA:01', ip: `${LAN}.104`, platform: 'Android', board: 'Galaxy S23', version: 'Android 14', iface: 'bridge1', by: 'mndp', age: 15000, link: 'wifi' },
+];
+
 const comments = ['managed by dashboard', 'provisioned 2024', 'do not remove', 'guest network', 'vendor default', 'ticket #4471', 'audit 2025', 'uplink', ''];
+
+/**
+ * Synthetic host names only read as credible if the MAC behind them belongs to the
+ * same brand — the inventory derives the vendor from the OUI, so an `iphone-*` on a
+ * MikroTik prefix would be reported as a MikroTik phone. Every prefix here exists in
+ * the OUI table in `shared/oui.ts`.
+ */
+const HOST_OUI: Record<string, string> = {
+  iphone: '3C:22:FB', 'ipad-air': 'F0:18:98', 'macbook-pro': 'A4:83:E7',
+  'galaxy-s23': '8C:77:12', 'pixel-8': '3C:5A:B4',
+  thinkpad: '00:09:6B', 'desktop-win': '18:66:DA',
+  'tv-lg': '00:1C:62', ps5: '00:13:A9', xbox: '00:0D:3A', roku: 'AC:3A:7A',
+  'printer-hp': '9C:B6:54', 'nest-thermostat': '18:B4:30', 'echo-dot': '44:65:0D',
+  raspberrypi: 'B8:27:EB', 'cctv-dvr': '44:19:B6',
+};
 
 export function buildState(): DemoState {
   idCounter = 0;
@@ -260,16 +304,24 @@ export function buildState(): DemoState {
     R('ip/dhcp-server', { name: 'dhcp-guest', interface: 'bridge-guest', 'address-pool': 'pool-guest', 'lease-time': '1h', authoritative: 'yes', 'use-radius': false, 'address-lists': 'GUEST-DHCP', comment: 'captive portal subnet' }, 900000),
   ];
   const leaseRows: Row[] = [];
+  const fleetByIp = new Map(FLEET.map((d) => [d.ip, d]));
   for (let i = 0; i < 26; i++) {
     const r = rng(900 + i);
     const guest = i > 20;
+    const address = guest ? `${GUEST}.${100 + i}` : i === 0 ? `${LAN}.11` : i < 16 ? `${LAN}.${100 + i}` : `172.16.10.${50 + i}`;
+    // A discovered neighbour already owns this address: the lease must agree with it
+    // (same MAC, same name) instead of inventing a second device on the same IP.
+    const fleet = fleetByIp.get(address);
+    const host = i === 0 ? '' : pick(hosts, r);
+    const hostName = fleet ? fleet.name : i === 0 ? 'noc-jumpbox' : `${host}-${pick(people, r)}`;
+    const leaseMac = fleet ? fleet.mac : i === 0 ? mac(r) : macFrom(HOST_OUI[host], r);
     leaseRows.push(R('ip/dhcp-server/lease', {
-      address: guest ? `${GUEST}.${100 + i}` : i === 0 ? `${LAN}.11` : i < 16 ? `${LAN}.${100 + i}` : `172.16.10.${50 + i}`,
-      'mac-address': mac(r), 'client-id': `1:${mac(r).toLowerCase()}`,
+      address,
+      'mac-address': leaseMac, 'client-id': `1:${leaseMac.toLowerCase()}`,
       server: guest ? 'dhcp-guest' : 'dhcp-lan',
       status: i === 0 ? 'bound' : pick(['bound', 'bound', 'bound', 'waiting', 'offered'], r),
       'expires-after': i === 0 ? 'never' : `${int(2, 9, r)}m${int(10, 59, r)}s`,
-      'last-seen': `${int(0, 3, r)}m${int(4, 59, r)}s`, 'host-name': i === 0 ? 'noc-jumpbox' : `${pick(hosts, r)}-${pick(people, r)}`,
+      'last-seen': `${int(0, 3, r)}m${int(4, 59, r)}s`, 'host-name': hostName,
       dynamic: i !== 0 && i !== 4, blocked: i === 17, disabled: false,
       comment: i === 0 ? 'static jump host' : i === 4 ? 'static printer' : '',
       'address-lists': guest ? 'GUEST-DHCP' : '',
@@ -631,7 +683,7 @@ export function buildState(): DemoState {
       'preshared-key': '', 'persistent-keepalive': i % 3 === 0 ? '25s' : '0s',
       'current-endpoint-address': i % 3 === 0 ? '' : `${WAN}.${int(2, 80, r)}`,
       'current-endpoint-port': i % 3 === 0 ? '' : int(1024, 65000, r),
-      'last-handshake': i === 6 ? 'never' : duration(r),
+      'last-handshake': i === 6 ? 'never' : i === 4 ? '6m12s' : i % 3 === 0 ? 'never' : `${int(8, 170, r)}s`,
       rx: int(1e5, 9e7, r), tx: int(1e5, 9e7, r), responder: chance(0.4, r),
       comment: pick(['laptop', 'phone', 'branch router', 'CI runner', ''], r),
     }, int(300, 400000, r));
@@ -953,6 +1005,118 @@ export function buildState(): DemoState {
   t['tool/dns-update'] = [R('tool/dns-update', { name: 'cloudflare-home', 'dns-server': 'dyn.example.net', address: 'vpn.example.net', key: '********', 'key-name': 'mtk-accra', ttl: '5m', comment: 'DDNS' }, 700000)];
   t['tool/keygen'] = [];
   t['dude'] = [{ enabled: true, 'data-directory': '/disk1/dude', status: 'running', version: '7.16.2' }];
+
+  /* ------------------------------------------------------------------ *
+   * Discovery / analytics fixtures
+   * ------------------------------------------------------------------ */
+
+  // A managed fleet with real OUIs: neighbour discovery (LLDP/MNDP/CDP) only
+  // reports devices that announce themselves, which is exactly what the map,
+  // the device inventory and the vendor lookup are built to merge.
+
+  t['ip/neighbor'] = [];
+  FLEET.forEach((d, i) => {
+    R('ip/neighbor', {
+      address: d.ip, 'mac-address': d.mac, interface: d.iface, identity: d.name,
+      platform: d.platform, board: d.board, version: d.version,
+      uptime: i < 6 ? duration(rng(4100 + i)) : '', 'discovered-by': d.by,
+      age: `${int(1, 40, rng(4200 + i))}s`, 'software-id': hex(rng(4300 + i), 8).toUpperCase(),
+    }, d.age);
+  });
+
+  // Extra leases: a duplicate address (conflict), an offline client and a static
+  // reservation that matches a discovered neighbour.
+  R('ip/dhcp-server/lease', {
+    address: `${LAN}.104`, 'mac-address': '9C:3D:CF:AA:BB:CC', 'client-id': '1:9c:3d:cf:aa:bb:cc',
+    'host-name': 'unknown-laptop', status: 'bound', dynamic: true, server: 'dhcp-lan',
+    'expires-after': '9m58s', 'last-seen': '12s', comment: 'duplicate address',
+  }, 4000);
+  R('ip/dhcp-server/lease', {
+    address: `${LAN}.150`, 'mac-address': '44:19:B6:99:88:77', 'client-id': '1:44:19:b6:99:88:77',
+    'host-name': 'legacy-camera', status: 'waiting', dynamic: true, server: 'dhcp-lan',
+    'expires-after': '', 'last-seen': '2h14m', comment: 'offline since Monday',
+  }, 90000);
+  R('ip/dhcp-server/lease', {
+    address: `${LAN}.61`, 'mac-address': 'B8:27:EB:AB:CD:01', 'client-id': '1:b8:27:eb:ab:cd:01',
+    'host-name': 'pi-monitor', status: 'bound', dynamic: false, server: 'dhcp-lan',
+    comment: 'static reservation',
+  }, 900000);
+
+  // Keep the demo self-consistent: a DHCP lease is the authority for its address,
+  // so ARP/neighbour rows copy that MAC instead of inventing a second device.
+  // (The deliberate duplicate lease at .104 is left alone so the IPAM panel has a
+  // real conflict to report.)
+  const leaseMacByIp = new Map<string, string>();
+  for (const lease of t['ip/dhcp-server/lease'] ?? []) {
+    const ip = String(lease.address ?? '');
+    const mac = String(lease['mac-address'] ?? '');
+    if (ip && mac && !leaseMacByIp.has(ip)) leaseMacByIp.set(ip, mac);
+  }
+  for (const row of t['ip/arp'] ?? []) {
+    const mac = leaseMacByIp.get(String(row.address ?? ''));
+    if (mac) row['mac-address'] = mac;
+  }
+  // MNDP/LLDP neighbours carry their own identity and hand-authored brand MAC — a
+  // lease for the same address must not overwrite them (it would report the wrong vendor).
+  for (const row of t['ip/neighbor'] ?? []) {
+    if (row.identity) continue;
+    const mac = leaseMacByIp.get(String(row.address ?? ''));
+    if (mac) row['mac-address'] = mac;
+  }
+  // Neighbour discovery is authoritative for addresses without a lease.
+  const neighborMacByIp = new Map(t['ip/neighbor'].map((r) => [String(r.address), String(r['mac-address'])]));
+  for (const row of t['ip/arp'] ?? []) {
+    const mac = neighborMacByIp.get(String(row.address ?? ''));
+    if (mac) row['mac-address'] = mac;
+  }
+
+  // Rogue DHCP server seen on the LAN (RouterOS raises this itself).
+  t['ip/dhcp-server/alert'] = [R('ip/dhcp-server/alert', {
+    address: `${LAN}.250`, 'mac-address': '9C:3D:CF:12:34:56', interface: 'bridge1',
+    'server-name': 'rogue-ap', 'valid-time': '2m30s', 'alert-timeout': '1m',
+    comment: 'unknown DHCP server answering on LAN',
+  }, 420)];
+
+  // Layer 7 matchers: on-device payload matching, the closest thing RouterOS
+  // offers to real DPI without an external sensor.
+  t['ip/firewall/layer7-protocol'] = [];
+  [
+    ['youtube', '^.+(www\.youtube\.com|youtube\.com|youtu\.be|googlevideo\.com).*$'],
+    ['netflix', '^.+(netflix\.com|nflxvideo\.net|nflximg\.com|nflxso\.net).*$'],
+    ['zoom', '^.+(zoom\.us|zoomgov\.com|zmtr\.us).*$'],
+    ['whatsapp', '^.+(whatsapp\.com|whatsapp\.net|wa\.me|mmg\.whatsapp\.net).*$'],
+    ['tiktok', '^.+(tiktok\.com|tiktokcdn\.com|tiktokv\.com|musical\.ly).*$'],
+    ['bittorrent', '^(\x13bittorrent protocol|azver\x01$|get /scrape\?info_hash=|get /announce\?info_hash=|get /client/bitcomet/)'],
+  ].forEach(([name, regexp], i) => R('ip/firewall/layer7-protocol', { name, regexp }, 800000 - i * 1000));
+
+  // Mangle rules that classify traffic with those matchers (counters feed the
+  // traffic analytics page).
+  [
+    ['youtube', 'video-stream', 412000000000, 388000000],
+    ['netflix', 'video-stream', 268000000000, 214000000],
+    ['zoom', 'interactive', 41000000000, 52000000],
+    ['whatsapp', 'interactive', 12400000000, 31000000],
+    ['bittorrent', 'bulk', 8800000000, 9400000],
+  ].forEach(([matcher, mark, bytes, packets], i) => R('ip/firewall/mangle', {
+    chain: 'prerouting', action: 'mark-packet', 'layer7-protocol': matcher,
+    'new-packet-mark': mark, bytes, packets, comment: `L7 classification: ${matcher}`,
+  }, 700000 - i * 1000));
+
+  // Packet-mirror target for the (stopped) flow sensor container.
+  const mirror = (t['interface/ethernet'] ?? []).find((e) => e.name === 'sfp-sfpplus2');
+  if (mirror) mirror.comment = 'mirror source -> ntopng veth-ntopng';
+  R('container', {
+    name: 'ntopng-flow-sensor', image: 'docker.io/ntop/ntopng:stable', interface: 'veth-ntopng',
+    'root-dir': '/disk1/containers/ntopng', status: 'stopped', 'cpu-usage': 0, 'memory-usage': 0,
+    'memory-shared': 0, tag: 'stable', arch: 'arm64',
+    comment: 'DPI sensor - consumes the sfp-sfpplus2 mirror, start it to get payload analytics',
+  }, 800000);
+
+  // RouterOS update channel state drives one of the hygiene findings.
+  t['system/package/update'] = [{
+    'installed-version': '7.16.2', 'latest-version': '7.17.1', status: 'New version is available',
+    channel: 'stable', 'check-for-updates': true,
+  }];
 
   const byPath = new Map(ENDPOINTS.map((e) => [e.path, e]));
   for (const ep of ENDPOINTS) {

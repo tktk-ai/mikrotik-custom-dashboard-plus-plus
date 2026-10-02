@@ -17,7 +17,7 @@ type Expectation = { route: string; expect: string[] };
 
 const ROUTES: Expectation[] = [
   { route: '/', expect: ['CPU', 'Interfaces'] },
-  { route: '/explorer', expect: ['Catalogued menus', '277'] },
+  { route: '/explorer', expect: ['Catalogued menus', 'Typed property fields'] },
   { route: '/connections', expect: ['Demo lab'] },
   { route: '/console', expect: ['Console', 'Example commands'] },
   { route: '/settings', expect: ['Appearance', 'Keyboard shortcuts'] },
@@ -43,9 +43,25 @@ const ROUTES: Expectation[] = [
   { route: '/m/routing/bgp/session', expect: ['to-upstream-1'] },
   { route: '/m/mpls/ldp', expect: [] },
   { route: '/m/this/does/not/exist', expect: ['No menu named'] },
+  // analytics pages
+  { route: '/topology', expect: ['Network map', 'Devices', 'Legend'] },
+  { route: '/devices', expect: ['Devices', 'Vendors'] },
+  { route: '/insights', expect: ['Insights', 'Score breakdown'] },
+  { route: '/traffic', expect: ['Traffic', 'Application classes', 'Tracked flows'] },
 ];
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/** Clickable checks: render a page, click something, assert the result appears. */
+const INTERACTIONS: Array<{ route: string; click: string; expect: Array<string | string[]>; note: string }> = [
+  { route: '/traffic', click: 'Deep inspection', expect: ['Ways to get deeper visibility', 'not over REST'], note: 'DPI tab' },
+  { route: '/insights', click: 'Address space', expect: ['Addresses in use', 'DHCP pool'], note: 'IPAM tab' },
+  // The first insights read only establishes a baseline; later reads diff against it,
+  // so accept either state here.
+  { route: '/insights', click: 'Changes', expect: [['Baseline recorded', 'Changed sections', 'configuration drift']], note: 'change tracking tab' },
+  { route: '/topology', click: 'Subnets', expect: ['Gateway', 'Utilisation'], note: 'segment table' },
+  { route: '/devices', click: 'Wi-Fi', expect: ['Wireless'], note: 'link filter' },
+];
 
 async function main() {
   const errors: string[] = [];
@@ -153,9 +169,54 @@ async function main() {
     await sleep(50);
   }
 
+  /* --------------------------- interactions --------------------------- */
+  realError('');
+  for (const check of INTERACTIONS) {
+    errors.length = 0;
+    const host = w.document.createElement('div');
+    w.document.body.appendChild(host);
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: 1000 } } });
+    const root = createRoot(host);
+    root.render(
+      React.createElement(
+        QueryClientProvider,
+        { client },
+        React.createElement(AppProvider, null, React.createElement(MemoryRouter, { initialEntries: [check.route] }, React.createElement(App))),
+      ),
+    );
+    await sleep(1500);
+
+    const target = [...host.querySelectorAll('button, a, [role="tab"]')].find((el) =>
+      (el.textContent ?? '').trim().toLowerCase().includes(check.click.toLowerCase()));
+    if (!target) {
+      failures.push(`${check.route} → ${check.click}`);
+      realError(`[FAIL] ${check.note.padEnd(22)} could not find control "${check.click}" on ${check.route}`);
+    } else {
+      target.dispatchEvent(new w.MouseEvent('click', { bubbles: true, cancelable: true }));
+      await sleep(700);
+      const text = (host.textContent ?? '').replace(/\s+/g, ' ');
+      const missing = check.expect
+        .map((option) => (Array.isArray(option) ? option.find((needle) => text.includes(needle)) : text.includes(option) ? option : undefined))
+        .filter((found) => found === undefined);
+      if (missing.length || errors.length) {
+        failures.push(`${check.route} → ${check.click}`);
+        realError(`[FAIL] ${check.note.padEnd(22)} missing=${JSON.stringify(missing)} errors=${errors.length}`);
+        for (const e of errors.slice(0, 2)) realError(`       console: ${e.split('\n')[0].slice(0, 180)}`);
+      } else {
+        realError(`[ ok ] ${check.note.padEnd(22)} ${check.route} → "${check.click}"`);
+      }
+    }
+
+    root.unmount();
+    client.clear();
+    host.remove();
+    await sleep(50);
+  }
+
   console.error = realError;
   console.warn = realWarn;
-  realError(`\n${ROUTES.length - failures.length}/${ROUTES.length} routes rendered cleanly.`);
+  const total = ROUTES.length + INTERACTIONS.length;
+  realError(`\n${total - failures.length}/${total} checks passed (${ROUTES.length} routes, ${INTERACTIONS.length} interactions).`);
   if (failures.length) realError(`failed: ${failures.join(', ')}`);
   process.exit(failures.length ? 1 : 0);
 }
