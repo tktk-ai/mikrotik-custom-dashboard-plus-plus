@@ -53,7 +53,14 @@ const ROUTES: Expectation[] = [
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /** Clickable checks: render a page, click something, assert the result appears. */
-const INTERACTIONS: Array<{ route: string; clicks: string[]; expect: Array<string | string[]>; note: string }> = [
+const INTERACTIONS: Array<{
+  route: string;
+  clicks: string[];
+  expect: Array<string | string[]>;
+  note: string;
+  /** Map links are SVG hit areas; click them one by one until the panel opens. */
+  retryLinkClicks?: boolean;
+}> = [
   { route: '/traffic', clicks: ['Deep inspection'], expect: ['Ways to get deeper visibility', 'not over REST'], note: 'DPI tab' },
   { route: '/insights', clicks: ['Address space'], expect: ['Addresses in use', 'DHCP pool'], note: 'IPAM tab' },
   // The first insights read only establishes a baseline; later reads diff against it,
@@ -64,6 +71,10 @@ const INTERACTIONS: Array<{ route: string; clicks: string[]; expect: Array<strin
   { route: '/insights', clicks: ['Alerts'], expect: ['Alert rules', 'Scheduled report', 'Delivery log'], note: 'alerts tab' },
   { route: '/traffic', clicks: ['Deep inspection', 'New matcher'], expect: ['New Layer 7 matcher', 'Also add a mangle rule'], note: 'DPI matcher wizard' },
   { route: '/devices', clicks: ['Sweep'], expect: ['Bulk device sweep', 'ICMP reachability', 'not a port scan'], note: 'sweep drawer' },
+  {
+    route: '/topology', clicks: [], retryLinkClicks: true,
+    expect: ['Peak', 'Average', 'Samples', 'simulated history (demo device)'], note: 'link drill-down',
+  },
 ];
 
 async function main() {
@@ -198,6 +209,24 @@ async function main() {
         ?? all.find((el) => (el.textContent ?? '').trim().toLowerCase().includes(wanted));
     };
 
+    const readText = () => (w.document.body.textContent ?? '').replace(/\s+/g, ' ');
+    const satisfied = () => check.expect.every((option) => (
+      Array.isArray(option)
+        ? option.some((needle) => readText().includes(needle))
+        : readText().includes(option)
+    ));
+
+    // Some links carry no interface, so a click can legitimately do nothing: keep
+    // clicking the transparent hit areas until the drill-down panel answers.
+    if (check.retryLinkClicks) {
+      const hitAreas = [...w.document.body.querySelectorAll('path[stroke="transparent"]')];
+      for (const area of hitAreas) {
+        if (satisfied()) break;
+        area.dispatchEvent(new w.MouseEvent('click', { bubbles: true, cancelable: true }));
+        await sleep(1400);
+      }
+    }
+
     let missingControl: string | null = null;
     for (const label of check.clicks) {
       const target = findControl(label);
@@ -210,7 +239,7 @@ async function main() {
       failures.push(`${check.route} → ${check.clicks.join(' → ')}`);
       realError(`[FAIL] ${check.note.padEnd(22)} could not find control "${missingControl}" on ${check.route}`);
     } else {
-      const text = (w.document.body.textContent ?? '').replace(/\s+/g, ' ');
+      const text = readText();
       const missing = check.expect
         .map((option) => (Array.isArray(option) ? option.find((needle) => text.includes(needle)) : text.includes(option) ? option : undefined))
         .filter((found) => found === undefined);

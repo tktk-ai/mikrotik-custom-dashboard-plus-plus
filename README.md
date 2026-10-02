@@ -171,7 +171,7 @@ scripts/gen-icons.mjs Regenerates the tree-shakeable lucide icon registry after 
 | `npm run build` | Production bundle into `dist/` |
 | `npm start` / `npm run serve` | Serve API + built UI (serve = build then start) |
 | `npm run typecheck` | `tsc --noEmit` over server, shared, scripts and UI |
-| `npm run smoke` | Renders the real app inside jsdom across 31 routes, 8 click-through interactions and 10 API checks against the running API, asserting live data and zero console errors (needs `npm run dev:api`) |
+| `npm run smoke` | Renders the real app inside jsdom across 31 routes, 9 click-through interactions and 10 API checks against the running API, asserting live data and zero console errors (needs `npm run dev:api`) |
 | `node scripts/gen-icons.mjs` | Rebuild `src/components/iconRegistry.tsx` (explicit icon imports — keeps the main bundle ~124 kB gzipped instead of ~250 kB) |
 
 ## Verification
@@ -183,9 +183,9 @@ npm run smoke       # needs the API running: npm run dev:api (demo device is fin
 ```
 
 The smoke test boots the actual `App` (shell, router, lazy pages, react-query) in jsdom, visits 31 routes — every
-page type, the analytics pages, plus list, singleton, command and unknown-menu endpoints — then clicks through eight
+page type, the analytics pages, plus list, singleton, command and unknown-menu endpoints — then clicks through nine
 real interactions (DPI tab, IPAM tab, change tracking, alerts tab, sweep drawer, DPI matcher wizard, subnet table,
-device link filter). It fails if a route paints no data, hits an error state, or logs a console error/warning:
+device link filter, map link drill-down). It fails if a route paints no data, hits an error state, or logs a console error/warning:
 
 ```
 [ ok ] /                           6762 chars
@@ -197,7 +197,7 @@ device link filter). It fails if a route paints no data, hits an error state, or
 [ ok ] api report (markdown)        7.7 kB
 [ ok ] api device sweep (SSE)       1.9 kB
 [ ok ] api alerts                   0.1 kB
-49/49 checks passed (31 routes, 8 interactions, 10 API).
+50/50 checks passed (31 routes, 9 interactions, 10 API).
 ```
 
 ## Security notes
