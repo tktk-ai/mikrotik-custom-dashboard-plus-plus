@@ -12,7 +12,7 @@ import { buildDevices } from './analytics/devices';
 import { runSweep, sweepTargets } from './analytics/sweep';
 import {
   clearEvents, createRule, deleteRule, deliverReport, evaluateAlerts, getSchedule,
-  listEvents, listRules, reportDue, setSchedule, testWebhook, updateRule,
+  listEvents, listRules, reportDue, seedDemoAlerts, setSchedule, testWebhook, updateRule,
 } from './analytics/alerts';
 import { list } from './analytics/collect';
 import { buildTraffic } from './analytics/traffic';
@@ -475,6 +475,8 @@ const analyseNow = async (includeTraffic: boolean): Promise<InsightBundle> => {
 };
 
 router.get('/alerts', (_req, res) => {
+  // A demo device opens the alerts tab with an illustrative starter set.
+  if (analyticsMode() === 'demo') seedDemoAlerts();
   ok(res, { rules: listRules(), events: listEvents(), schedule: getSchedule() });
 });
 

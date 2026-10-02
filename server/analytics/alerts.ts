@@ -58,6 +58,73 @@ const persist = () => {
 const nextId = (prefix: string) => `${prefix}-${Date.now().toString(36)}-${(++counter).toString(36)}`;
 
 /* ------------------------------------------------------------------ *
+ * Demo starter set
+ * ------------------------------------------------------------------ */
+
+const HOUR = 60 * 60 * 1000;
+
+/**
+ * A brand-new install on the demo device opens the alerts tab with something to
+ * look at: three rules that mirror the demo findings, a delivery log with real
+ * history, and a schedule that has already run once. Only used when no store file
+ * exists — a live install's rules are never touched.
+ */
+const demoSeed = (): Store => {
+  const now = Date.now();
+  const rules: AlertRule[] = [
+    {
+      id: 'rule-demo-critical', name: 'Critical findings', enabled: true, type: 'severity-count',
+      severity: 'critical', threshold: 1, channel: 'log', cooldownMinutes: 5,
+      createdAt: now - 6 * 24 * HOUR, lastTriggeredAt: now - 9 * HOUR,
+    },
+    {
+      id: 'rule-demo-score', name: 'Health score under 90', enabled: true, type: 'score-below',
+      severity: 'medium', threshold: 90, channel: 'log', cooldownMinutes: 720,
+      createdAt: now - 6 * 24 * HOUR, lastTriggeredAt: now - 26 * HOUR,
+    },
+    {
+      id: 'rule-demo-newfindings', name: 'New findings digest', enabled: false, type: 'new-findings',
+      severity: 'high', threshold: 1, channel: 'webhook', url: 'https://hooks.example.net/routeros',
+      cooldownMinutes: 240, createdAt: now - 2 * 24 * HOUR,
+    },
+  ];
+  const events: AlertEvent[] = [
+    {
+      id: 'evt-demo-1', at: now - 2 * HOUR, ruleId: 'rule-demo-critical', ruleName: 'Critical findings',
+      severity: 'critical', value: 1, delivery: 'logged',
+      message: '1 finding at critical or worse (threshold 1) — "Rogue DHCP server on bridge1"',
+    },
+    {
+      id: 'evt-demo-2', at: now - 9 * HOUR, ruleId: 'rule-demo-critical', ruleName: 'Critical findings',
+      severity: 'critical', value: 1, delivery: 'logged',
+      message: '1 finding at critical or worse (threshold 1) — "Rogue DHCP server on bridge1"',
+    },
+    {
+      id: 'evt-demo-3', at: now - 26 * HOUR, ruleId: 'rule-demo-score', ruleName: 'Health score under 90',
+      severity: 'medium', value: 88, delivery: 'logged',
+      message: 'Health score 88 (B) is below the threshold of 90',
+    },
+    {
+      id: 'evt-demo-4', at: now - 26 * HOUR, ruleId: 'scheduled-report', ruleName: 'Scheduled report',
+      severity: 'info', value: 7594, delivery: 'logged',
+      message: 'Network health report generated (7.4 kB).',
+    },
+  ];
+  return {
+    rules,
+    events,
+    schedule: { enabled: false, everyHours: 24, includeTraffic: true, lastRunAt: now - 26 * HOUR },
+  };
+};
+
+/** Seeds the starter set once, on a device that has no alerts store yet. */
+export const seedDemoAlerts = (): void => {
+  if (store || fs.existsSync(FILE)) return;
+  store = demoSeed();
+  persist();
+};
+
+/* ------------------------------------------------------------------ *
  * Rules
  * ------------------------------------------------------------------ */
 
