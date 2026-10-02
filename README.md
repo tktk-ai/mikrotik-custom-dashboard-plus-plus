@@ -173,6 +173,7 @@ scripts/gen-icons.mjs Regenerates the tree-shakeable lucide icon registry after 
 | `npm run typecheck` | `tsc --noEmit` over server, shared, scripts and UI |
 | `npm run smoke` | Renders the real app inside jsdom across 31 routes, 9 click-through interactions and 10 API checks against the running API, asserting live data and zero console errors (needs `npm run dev:api`) |
 | `npx tsx scripts/snapshot-ui.tsx` | Render each page in jsdom and save it as a standalone HTML file (real DOM + inlined CSS) under `../ui-preview/` — for reviewing the UI without a server |
+| `python3 scripts/shoot-ui.py` | Screenshot the running dashboard with QtWebEngine (real Chromium, offscreen) into `../ui-preview/*.png` — needs `pip install PySide6 pymupdf` and the stub libraries from `scripts/headless-stub-libs.py` on `LD_LIBRARY_PATH` |
 | `node scripts/gen-icons.mjs` | Rebuild `src/components/iconRegistry.tsx` (explicit icon imports — keeps the main bundle ~124 kB gzipped instead of ~250 kB) |
 
 ## Verification
