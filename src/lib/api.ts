@@ -1,6 +1,8 @@
 /** Typed client for the dashboard's own HTTP API. */
 
-import type { InsightBundle, Topology, TrafficBundle } from '@shared/analytics';
+import type {
+  AlertRule, AlertEvent, InsightBundle, LinkHistory, ReportSchedule, Topology, TrafficBundle,
+} from '@shared/analytics';
 import type { Row } from '@shared/types';
 
 export interface ApiFailure {
@@ -152,6 +154,26 @@ export const api = {
   insights: (includeTraffic = false) => request<InsightBundle>(`/api/insights${includeTraffic ? '?traffic=true' : ''}`),
   traffic: () => request<TrafficBundle>('/api/traffic'),
   probeDevice: (ip: string) => request<DeviceProbe>(`/api/device/${encodeURIComponent(ip)}`),
+  linkHistory: (iface: string, hours = 6) =>
+    request<LinkHistory>(`/api/topology/link-history?interface=${encodeURIComponent(iface)}&hours=${hours}`),
+
+  captures: () => request<{ files: Array<{ name: string; size: number; type: string }>; mode: string; downloadHint: string }>('/api/traffic/captures'),
+  createMatcher: (body: Row) => request<{ created: boolean; row: Row; mode: string }>('/api/traffic/l7', { method: 'POST', body: JSON.stringify(body) }),
+  createMangle: (body: Row) => request<{ created: boolean; row: Row; mode: string }>('/api/traffic/mangle', { method: 'POST', body: JSON.stringify(body) }),
+  sniffer: (body: Row) => request<Row>('/api/traffic/sniffer', { method: 'POST', body: JSON.stringify(body) }),
+
+  alerts: () => request<{ rules: AlertRule[]; events: AlertEvent[]; schedule: ReportSchedule }>('/api/alerts'),
+  createAlert: (body: Partial<AlertRule>) => request<{ rule: AlertRule }>('/api/alerts/rules', { method: 'POST', body: JSON.stringify(body) }),
+  updateAlert: (id: string, body: Partial<AlertRule>) => request<{ rule: AlertRule }>(`/api/alerts/rules/${id}`, { method: 'PATCH', body: JSON.stringify(body) }),
+  deleteAlert: (id: string) => request<{ deleted: boolean }>(`/api/alerts/rules/${id}`, { method: 'DELETE' }),
+  checkAlerts: () => request<{ fired: AlertEvent[]; events: AlertEvent[] }>('/api/alerts/check', { method: 'POST' }),
+  clearAlertEvents: () => request<{ cleared: boolean }>('/api/alerts/events/clear', { method: 'POST' }),
+  testWebhook: (url: string) => request<{ delivery: string }>('/api/alerts/test-webhook', { method: 'POST', body: JSON.stringify({ url }) }),
+  schedule: (body: Partial<ReportSchedule>) => request<{ schedule: ReportSchedule }>('/api/reports/schedule', { method: 'POST', body: JSON.stringify(body) }),
+  runReport: () => request<{ delivered: string; bytes: number }>('/api/reports/run', { method: 'POST', body: JSON.stringify({}) }),
+
+  /** Relative URL for the Markdown report — used as a download link. */
+  reportUrl: (download = true) => `/api/insights/report?format=md&traffic=true${download ? '&download=true' : ''}`,
   resetDemo: () => request<{ reset: boolean }>('/api/demo/reset', { method: 'POST' }),
 };
 

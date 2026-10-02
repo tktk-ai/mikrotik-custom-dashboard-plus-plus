@@ -7,7 +7,7 @@
  * those options is already wired up on this device.
  */
 import React, { useMemo, useState } from 'react';
-import { useQuery } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link } from 'react-router-dom';
 import clsx from 'clsx';
 import { APP_CATEGORY_COLORS, type AppCategory } from '@shared/analytics';
@@ -16,13 +16,16 @@ import { api, ApiError } from '../lib/api';
 import { useApp } from '../lib/store';
 import { fmtBytes, fmtNumber, relativeTime } from '../lib/format';
 import { DataTable, type ColumnDef } from '../components/DataTable';
-import { Badge, EmptyState, Icon, Segmented, Spinner, Stat, TableSkeleton } from '../components/ui';
+import { Badge, EmptyState, Icon, Segmented, Spinner, Stat, TableSkeleton, Field, Modal, Toggle, toast, CopyButton } from '../components/ui';
 import { Donut } from '../components/charts';
 import { ModeChip, UtilBar } from '../components/network';
 
 const asRows = <T,>(items: T[]): Row[] => items as unknown as Row[];
 
 const FIDELITY_TONE: Record<string, string> = { payload: 'chip-good', headers: 'chip-info', metadata: 'chip-neutral' };
+
+/** Default capture name per day, so successive captures do not overwrite each other. */
+const suggestedCaptureFile = () => `capture-${new Date().toISOString().slice(0, 10)}.pcap`;
 
 const Traffic: React.FC = () => {
   const { connection, mode } = useApp();
@@ -37,6 +40,57 @@ const Traffic: React.FC = () => {
 
   const traffic = query.data;
   const error = query.error as ApiError | null;
+
+  /* ------------------------- DPI tooling (writes) ------------------------- */
+  const qc = useQueryClient();
+  const [matcherOpen, setMatcherOpen] = useState(false);
+  const [matcherName, setMatcherName] = useState('');
+  const [matcherRegexp, setMatcherRegexp] = useState('');
+  const [markPackets, setMarkPackets] = useState(true);
+  const [snifferFilter, setSnifferFilter] = useState('ether1');
+  const [snifferFile, setSnifferFile] = useState(suggestedCaptureFile);
+  const [snifferOpen, setSnifferOpen] = useState(false);
+
+  const invalidate = () => {
+    void qc.invalidateQueries({ queryKey: ['traffic'] });
+    void qc.invalidateQueries({ queryKey: ['captures'] });
+  };
+
+  const captures = useQuery({
+    queryKey: ['captures'],
+    queryFn: () => api.captures(),
+    enabled: tab === 'dpi',
+    staleTime: 30_000,
+    refetchOnWindowFocus: false,
+  });
+
+  const createMatcher = useMutation({
+    mutationFn: async () => {
+      const created = await api.createMatcher({ name: matcherName.trim(), regexp: matcherRegexp, comment: 'dashboard l7 matcher' });
+      if (markPackets) await api.createMangle({ matcher: matcherName.trim(), chain: 'prerouting', comment: `classify ${matcherName.trim()}` });
+      return created;
+    },
+    onSuccess: () => {
+      toast.success('Matcher created', markPackets ? `${matcherName} is matching, and a mangle rule marks its packets` : `${matcherName} is matching`);
+      setMatcherOpen(false);
+      setMatcherName('');
+      setMatcherRegexp('');
+      invalidate();
+    },
+    onError: (err) => toast.error('Could not create matcher', (err as Error).message),
+  });
+
+  const sniffer = useMutation({
+    mutationFn: (running: boolean) => api.sniffer({ running, filter: snifferFilter, file: snifferFile }),
+    onSuccess: (_data, running) => {
+      toast.success(running ? 'Sniffer started' : 'Sniffer stopped', running ? `Capturing on ${snifferFilter} into ${snifferFile}` : 'Capture stopped');
+      setSnifferOpen(false);
+      invalidate();
+    },
+    onError: (err) => toast.error('Sniffer command failed', (err as Error).message),
+  });
+
+
 
   const categorySplit = useMemo(() => {
     if (!traffic) return [];
@@ -250,7 +304,11 @@ const Traffic: React.FC = () => {
                   <div className="mb-2 flex items-center gap-2">
                     <Icon name="Filter" size={15} className="text-brand" />
                     <span className="text-[13px] font-semibold text-ink">On-device Layer 7 matchers</span>
-                    <span className="ml-auto chip chip-neutral">{traffic.dpi.l7.matchers.length}</span>
+                    <span className="chip chip-neutral">{traffic.dpi.l7.matchers.length}</span>
+                    <button className="btn btn-sm ml-auto" onClick={() => setMatcherOpen(true)}>
+                      <Icon name="Plus" size={12} />
+                      New matcher
+                    </button>
                   </div>
                   {traffic.dpi.l7.matchers.length === 0
                     ? <p className="text-[12px] text-dim">No matchers configured. Layer 7 rules let the router classify payloads it can already see — cheap, but licence-bounded and CPU-heavy.</p>
@@ -298,6 +356,54 @@ const Traffic: React.FC = () => {
                     <div><div className="label">Remote syslog</div><div className="text-ink">{traffic.dpi.remoteLogging ? `${traffic.dpi.remoteLogging} action(s)` : 'none'}</div></div>
                     <div><div className="label">Conntrack</div><div className="text-ink">{fmtNumber(traffic.dpi.conntrack?.entries ?? traffic.totalFlows)} entries</div></div>
                   </div>
+
+                  <div className="mt-3 border-t border-line/60 pt-3">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <button className="btn btn-sm" onClick={() => setSnifferOpen(true)}>
+                        <Icon name={traffic.dpi.sniffer?.running ? 'Square' : 'Play'} size={12} />
+                        {traffic.dpi.sniffer?.running ? 'Capture settings' : 'Start capture'}
+                      </button>
+                      {traffic.dpi.sniffer?.running && (
+                        <button className="btn btn-sm btn-ghost" onClick={() => sniffer.mutate(false)} disabled={sniffer.isPending}>
+                          {sniffer.isPending ? <Spinner className="size-3.5" /> : <Icon name="Square" size={12} />}
+                          Stop capture
+                        </button>
+                      )}
+                      <span className="text-[11px] text-faint">
+                        Capture-to-file is the only on-box payload path — analyse the pcap off-box.
+                      </span>
+                    </div>
+
+                    <div className="mt-3">
+                      <div className="mb-1 flex items-center gap-2">
+                        <span className="label">Capture files on the device</span>
+                        <button className="btn btn-sm btn-ghost ml-auto" onClick={() => captures.refetch()} disabled={captures.isFetching}>
+                          {captures.isFetching ? <Spinner className="size-3" /> : <Icon name="RefreshCw" size={11} />}
+                          Refresh
+                        </button>
+                      </div>
+                      {captures.data?.files.length ? (
+                        <div className="space-y-1">
+                          {captures.data.files.map((file) => (
+                            <div key={file.name} className="flex items-center gap-2 rounded-lg border border-line bg-base2/60 px-2 py-1.5">
+                              <Icon name="FileText" size={12} className="text-faint" />
+                              <span className="mono truncate text-[11.5px] text-ink">{file.name}</span>
+                              <span className="chip chip-neutral">{fmtBytes(file.size)}</span>
+                              <CopyButton value={file.name} label="copy name" className="ml-auto" />
+                            </div>
+                          ))}
+                        </div>
+                      ) : (
+                        <p className="text-[11.5px] text-faint">{captures.isLoading ? 'Reading the file list…' : 'No pcap files on the device yet.'}</p>
+                      )}
+                      {captures.data && (
+                        <p className="mt-2 flex items-start gap-1.5 text-[11px] text-faint">
+                          <Icon name="Info" size={11} className="mt-0.5 shrink-0" />
+                          {captures.data.downloadHint}
+                        </p>
+                      )}
+                    </div>
+                  </div>
                 </section>
               </div>
 
@@ -326,6 +432,84 @@ const Traffic: React.FC = () => {
                   ))}
                 </div>
               </section>
+
+              <Modal
+                open={matcherOpen}
+                onClose={() => setMatcherOpen(false)}
+                title="New Layer 7 matcher"
+                subtitle="RouterOS matches payload patterns it can already see and counts the bytes — the closest thing to on-box application detection"
+                footer={
+                  <>
+                    <button className="btn" onClick={() => setMatcherOpen(false)}>Cancel</button>
+                    <button
+                      className="btn btn-primary"
+                      onClick={() => createMatcher.mutate()}
+                      disabled={!matcherName.trim() || !matcherRegexp.trim() || createMatcher.isPending}
+                    >
+                      {createMatcher.isPending ? <Spinner className="size-3.5" /> : <Icon name="Plus" size={13} />}
+                      Create matcher
+                    </button>
+                  </>
+                }
+              >
+                <div className="space-y-3">
+                  <Field label="Name" hint="Referenced by mangle rules — letters, digits, dot, dash, underscore." required>
+                    <input className="input" value={matcherName} onChange={(e) => setMatcherName(e.target.value)} placeholder="e.g. tiktok-video" />
+                  </Field>
+                  <Field
+                    label="Regular expression"
+                    hint="RouterOS uses its own regex engine; matching is CPU-bound, so keep the pattern specific."
+                    required
+                  >
+                    <input
+                      className="input mono text-[12px]"
+                      value={matcherRegexp}
+                      onChange={(e) => setMatcherRegexp(e.target.value)}
+                      placeholder="e.g. ^(GET|POST) /api/v1/telemetry"
+                    />
+                  </Field>
+                  <Toggle
+                    checked={markPackets}
+                    onChange={setMarkPackets}
+                    label="Also add a mangle rule that marks matching packets (prerouting)"
+                  />
+                  <p className="flex items-start gap-1.5 text-[11.5px] text-faint">
+                    <Icon name="Info" size={12} className="mt-0.5 shrink-0" />
+                    This creates real configuration on the router. Nothing here decodes payloads for you — the counters tell you how much
+                    matched, and the packet mark lets queues and routes treat it differently.
+                  </p>
+                </div>
+              </Modal>
+
+              <Modal
+                open={snifferOpen}
+                onClose={() => setSnifferOpen(false)}
+                title="Start a capture"
+                subtitle="Writes a pcap on the device's storage — pull it off with SCP/FTP and open it in Wireshark or Zeek"
+                footer={
+                  <>
+                    <button className="btn" onClick={() => setSnifferOpen(false)}>Cancel</button>
+                    <button className="btn btn-primary" onClick={() => sniffer.mutate(true)} disabled={sniffer.isPending}>
+                      {sniffer.isPending ? <Spinner className="size-3.5" /> : <Icon name="Play" size={13} />}
+                      Start capture
+                    </button>
+                  </>
+                }
+              >
+                <div className="space-y-3">
+                  <Field label="Filter interface" hint="Capture on the uplink to see everything that crosses the WAN.">
+                    <input className="input" value={snifferFilter} onChange={(e) => setSnifferFilter(e.target.value)} placeholder="ether1" />
+                  </Field>
+                  <Field label="File name" required>
+                    <input className="input mono text-[12px]" value={snifferFile} onChange={(e) => setSnifferFile(e.target.value)} />
+                  </Field>
+                  <p className="flex items-start gap-1.5 text-[11.5px] text-faint">
+                    <Icon name="TriangleAlert" size={12} className="mt-0.5 shrink-0" />
+                    A running sniffer costs CPU and disk on the router. Stop it when the incident is over — for continuous visibility, mirror
+                    the port into a sensor container instead.
+                  </p>
+                </div>
+              </Modal>
 
               <section className="card p-3">
                 <div className="label mb-2">Menus this analysis read</div>

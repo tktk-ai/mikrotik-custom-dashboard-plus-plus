@@ -6,15 +6,17 @@
  * Selecting a device runs an on-demand probe (ping + reverse lookup + evidence)
  * through the backend.
  */
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { useMutation, useQuery } from '@tanstack/react-query';
 import clsx from 'clsx';
 import { DEVICE_KIND_LABEL, isTruthy, parseBytes, type DeviceKind, type DeviceRecord } from '@shared/analytics';
 import type { Row } from '@shared/types';
 import { api, ApiError, type DeviceProbe } from '../lib/api';
+import { Link, useSearchParams } from 'react-router-dom';
 import { useApp } from '../lib/store';
 import { fmtBytes, fmtNumber, relativeTime } from '../lib/format';
 import { DataTable, type ColumnDef } from '../components/DataTable';
+import { SweepPanel } from '../components/SweepPanel';
 import { Drawer, EmptyState, Icon, Segmented, Spinner, Stat, TableSkeleton, toast, useDebounced } from '../components/ui';
 import { KindChip, LinkChip, ModeChip, SignalBars } from '../components/network';
 
@@ -145,6 +147,23 @@ const Devices: React.FC = () => {
   const [link, setLink] = useState('all');
   const [kind, setKind] = useState<DeviceKind | 'all'>('all');
   const [selected, setSelected] = useState<DeviceRecord | null>(null);
+  const [sweepOpen, setSweepOpen] = useState(false);
+  const [params, setParams] = useSearchParams();
+  // The map links straight into a segment sweep: /devices?sweep=10.0.0.0/24
+  const sweepScope = params.get('sweep') ?? undefined;
+
+  useEffect(() => {
+    if (sweepScope) setSweepOpen(true);
+  }, [sweepScope]);
+
+  const closeSweep = () => {
+    setSweepOpen(false);
+    if (params.has('sweep')) {
+      const next = new URLSearchParams(params);
+      next.delete('sweep');
+      setParams(next, { replace: true });
+    }
+  };
 
   const topology = useQuery({
     queryKey: ['topology'],
@@ -179,6 +198,17 @@ const Devices: React.FC = () => {
     for (const device of devices) counts.set(device.kind, (counts.get(device.kind) ?? 0) + 1);
     return [...counts.entries()].sort((a, b) => b[1] - a[1]);
   }, [devices]);
+
+  const subnets = useMemo(() => {
+    const seen = new Map<string, number>();
+    for (const node of topology.data?.nodes ?? []) {
+      if (node.kind !== 'segment' || !node.cidr) continue;
+      seen.set(node.cidr, (node.devices?.length ?? 0) + (node.clients ?? 0));
+    }
+    return [...seen.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .map(([cidr, count]) => ({ cidr, label: `${cidr} (${count})` }));
+  }, [topology.data]);
 
   const rows = asRows(filtered);
   const stats = topology.data?.stats;
@@ -238,6 +268,10 @@ const Devices: React.FC = () => {
         </div>
         <div className="ml-auto flex items-center gap-2">
           <ModeChip mode={mode ?? undefined} />
+          <button className="btn btn-sm" onClick={() => setSweepOpen(true)} title="Probe every known host and stream the results">
+            <Icon name="Radar" size={13} />
+            Sweep
+          </button>
           <button className="btn btn-sm" onClick={() => topology.refetch()} disabled={topology.isFetching}>
             <Icon name="RefreshCw" size={13} className={clsx(topology.isFetching && 'animate-spin')} />
             Refresh
@@ -306,6 +340,21 @@ const Devices: React.FC = () => {
       </section>
 
       <DeviceDrawer device={selected} onClose={() => setSelected(null)} />
+
+      <Drawer
+        open={sweepOpen}
+        onClose={closeSweep}
+        title="Bulk device sweep"
+        subtitle={`Probe every address the router knows about${sweepScope ? ` · starting on ${sweepScope}` : ''}`}
+        width="max-w-3xl"
+      >
+        <SweepPanel
+          subnets={subnets}
+          initialScope={sweepScope}
+          deviceCount={devices.length}
+          onFinished={(summary) => toast.success(`Swept ${summary.total} addresses — ${summary.reachable} answered`)}
+        />
+      </Drawer>
     </div>
   );
 };

@@ -3,19 +3,20 @@
  * with the devices seen on each subnet. Everything is derived from RouterOS
  * menus by the backend; this page only lays it out and lets you filter it.
  */
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { Link } from 'react-router-dom';
 import clsx from 'clsx';
-import type { DeviceRecord, TopoNode } from '@shared/analytics';
+import type { DeviceRecord, TopoLink, TopoNode } from '@shared/analytics';
 import { DEVICE_KIND_LABEL } from '@shared/analytics';
 import type { Row } from '@shared/types';
 import { api, ApiError } from '../lib/api';
 import { useApp } from '../lib/store';
-import { fmtBytes, fmtNumber, relativeTime } from '../lib/format';
-import { NetGraph } from '../components/NetGraph';
+import { fmtBitrate, fmtBytes, fmtNumber, relativeTime } from '../lib/format';
+import { NetGraph, type NetGraphHandle, type Pin } from '../components/NetGraph';
 import { DataTable, type ColumnDef } from '../components/DataTable';
-import { Badge, EmptyState, Icon, Segmented, Spinner, Stat, TableSkeleton } from '../components/ui';
+import { Badge, EmptyState, Icon, Segmented, Spinner, Stat, TableSkeleton, toast } from '../components/ui';
+import { Sparkline } from '../components/charts';
 import { LinkChip, ModeChip, UtilBar } from '../components/network';
 import { DeviceDrawer } from './Devices';
 
@@ -28,6 +29,29 @@ const Topology: React.FC = () => {
   const [tab, setTab] = useState<Tab>('devices');
   const [search, setSearch] = useState('');
   const [selectedNode, setSelectedNode] = useState<string | null>(null);
+  const [selectedLink, setSelectedLink] = useState<{ link: TopoLink; iface?: string } | null>(null);
+  const graph = useRef<NetGraphHandle>(null),
+    [pins, setPins] = useState<Record<string, Pin>>(() => {
+      // Manual node positions are a per-browser preference, not router state.
+      try { return JSON.parse(localStorage.getItem('topology.pins') ?? '{}') as Record<string, Pin>; } catch { return {}; }
+    });
+
+  const savePins = (next: Record<string, Pin>) => {
+    setPins(next);
+    try { localStorage.setItem('topology.pins', JSON.stringify(next)); } catch { /* storage disabled */ }
+  };
+
+  const linkHistory = useQuery({
+    queryKey: ['link-history', selectedLink?.iface],
+    queryFn: () => api.linkHistory(selectedLink!.iface!, 6),
+    enabled: Boolean(selectedLink?.iface),
+    staleTime: 60_000,
+    refetchOnWindowFocus: false,
+  });
+
+  useEffect(() => {
+    if (selectedLink && !selectedLink.iface) setSelectedLink(null);
+  }, [selectedLink]);
   const [selectedDevice, setSelectedDevice] = useState<DeviceRecord | null>(null);
 
   const query = useQuery({
@@ -97,9 +121,14 @@ const Topology: React.FC = () => {
     { key: 'dhcp', label: 'DHCP', sortable: true, value: (row) => String((row.meta as Row | undefined)?.dhcpServer ?? ''), render: (row) => <span className="text-[11.5px] text-dim">{String((row.meta as Row | undefined)?.dhcpServer ?? '–')}</span> },
     {
       key: 'open', label: '', render: (row) => (
-        <button className="btn btn-sm btn-ghost" onClick={(e) => { e.stopPropagation(); setSelectedNode(String(row.id)); setTab('devices'); }}>
-          <Icon name="ListTree" size={12} />Devices
-        </button>
+        <span className="flex items-center gap-1">
+          <button className="btn btn-sm btn-ghost" onClick={(e) => { e.stopPropagation(); setSelectedNode(String(row.id)); setTab('devices'); }}>
+            <Icon name="ListTree" size={12} />Devices
+          </button>
+          <Link className="btn btn-sm btn-ghost" to={`/devices?sweep=${encodeURIComponent(String(row.cidr ?? ''))}`} onClick={(e) => e.stopPropagation()} title="Probe every host on this subnet">
+            <Icon name="Radar" size={12} />Sweep
+          </Link>
+        </span>
       ),
     },
   ];
@@ -176,13 +205,112 @@ const Topology: React.FC = () => {
                 />
               </div>
             </div>
+            <div className="mb-2 flex flex-wrap items-center gap-2">
+              <span className="text-[11px] text-faint">Drag a node to pin it where you want it</span>
+              {Object.keys(pins).length > 0 && (
+                <button className="btn btn-sm btn-ghost" onClick={() => savePins({})}>
+                  <Icon name="RotateCcw" size={12} />
+                  Reset layout ({Object.keys(pins).length})
+                </button>
+              )}
+              <div className="ml-auto flex items-center gap-2">
+                <button
+                  className="btn btn-sm"
+                  onClick={() => {
+                    const svg = graph.current?.exportSvg();
+                    if (!svg) return toast.error('Nothing to export', 'The map has no nodes yet.');
+                    const url = URL.createObjectURL(new Blob([svg], { type: 'image/svg+xml' }));
+                    const anchor = document.createElement('a');
+                    anchor.href = url;
+                    anchor.download = `network-map-${new Date().toISOString().slice(0, 10)}.svg`;
+                    anchor.click();
+                    URL.revokeObjectURL(url);
+                  }}
+                >
+                  <Icon name="FileDown" size={12} />
+                  SVG
+                </button>
+                <button
+                  className="btn btn-sm"
+                  onClick={async () => {
+                    const png = await graph.current?.exportPng();
+                    if (!png) return toast.error('PNG export unavailable', 'Your browser blocked canvas rendering — use the SVG export.');
+                    const anchor = document.createElement('a');
+                    anchor.href = png;
+                    anchor.download = `network-map-${new Date().toISOString().slice(0, 10)}.png`;
+                    anchor.click();
+                  }}
+                >
+                  <Icon name="Image" size={12} />
+                  PNG
+                </button>
+              </div>
+            </div>
             <NetGraph
+              ref={graph}
               topology={topology}
               selectedId={selectedNode}
-              onSelectNode={(node) => setSelectedNode(node.id)}
+              onSelectNode={(node) => { setSelectedNode(node.id); setSelectedLink(null); }}
               onOpenDevices={(node) => { setSelectedNode(node.id); setTab('devices'); }}
               isDimmed={(node) => (q ? !matches(node) : false)}
+              pins={pins}
+              onPinsChange={savePins}
+              selectedLink={selectedLink ? `${selectedLink.link.from}→${selectedLink.link.to}` : null}
+              onSelectLink={(link, iface) => setSelectedLink(iface ? { link, iface } : null)}
+              interfaceForLink={(link) => {
+                const endpoints = [link.from, link.to];
+                for (const id of endpoints) {
+                  const node = topology.nodes.find((n) => n.id === id);
+                  if (node?.interface) return node.interface;
+                  if (id.startsWith('if:')) return id.slice(3);
+                }
+                return undefined;
+              }}
             />
+
+            {selectedLink && selectedLink.iface && (
+              <div className="mt-3 rounded-xl border border-brand/30 bg-panel2/60 p-3">
+                <div className="flex flex-wrap items-center gap-2">
+                  <Icon name="Activity" size={14} className="text-brand" />
+                  <span className="text-[13px] font-semibold text-ink">{selectedLink.iface}</span>
+                  <span className="chip chip-neutral">{selectedLink.link.label ?? 'link'}</span>
+                  {selectedLink.link.link && <LinkChip link={selectedLink.link.link} />}
+                  <span className={clsx('chip', selectedLink.link.status === 'up' ? 'chip-good' : selectedLink.link.status === 'warn' ? 'chip-warn' : 'chip-bad')}>
+                    {selectedLink.link.status ?? 'up'}
+                  </span>
+                  <span className="ml-auto text-[11px] text-faint">
+                    last 6 h · {linkHistory.data?.source === 'demo' ? 'simulated history (demo device)' : 'recorded by this dashboard'}
+                  </span>
+                  <button className="btn btn-sm btn-ghost" onClick={() => setSelectedLink(null)}>
+                    <Icon name="X" size={12} />
+                  </button>
+                </div>
+                {linkHistory.isLoading && <div className="mt-2"><Spinner className="size-3.5" /></div>}
+                {linkHistory.data && linkHistory.data.points.length > 1 ? (
+                  <>
+                    <div className="mt-2 grid gap-2 sm:grid-cols-3">
+                      <Stat label="Peak" value={fmtBitrate(linkHistory.data.peak)} icon="TrendingUp" />
+                      <Stat label="Average" value={fmtBitrate(linkHistory.data.average)} icon="Activity" />
+                      <Stat label="Samples" value={fmtNumber(linkHistory.data.points.length)} icon="Database" />
+                    </div>
+                    <div className="mt-2">
+                      <Sparkline data={linkHistory.data.points.map((point) => point.rx + point.tx)} tone="brand" height={46} className="w-full" />
+                    </div>
+                  </>
+                ) : !linkHistory.isLoading ? (
+                  <p className="mt-2 text-[11.5px] text-faint">
+                    No throughput samples for this interface yet — the dashboard records them on every analysis (keep it open, or check back
+                    in a few minutes).
+                  </p>
+                ) : null}
+                <div className="mt-2 flex flex-wrap gap-2">
+                  <Link to="/insights" className="btn btn-sm btn-ghost">
+                    <Icon name="Gauge" size={12} />
+                    Interface detail in Insights
+                  </Link>
+                </div>
+              </div>
+            )}
           </section>
 
           <div className="flex flex-wrap items-center gap-2">

@@ -17,6 +17,7 @@ import { fmtBitrate, fmtBytes, fmtNumber, relativeTime } from '../lib/format';
 import { DataTable, type ColumnDef } from '../components/DataTable';
 import { EmptyState, Icon, Segmented, Spinner, Stat, TableSkeleton } from '../components/ui';
 import { Gauge, Sparkline } from '../components/charts';
+import { AlertsPanel } from '../components/AlertsPanel';
 import { LinkChip, ModeChip, SEVERITY_DOT, SeverityChip, SignalBars, UtilBar } from '../components/network';
 
 const asRows = <T,>(items: T[]): Row[] => items as unknown as Row[];
@@ -153,7 +154,7 @@ const InsightRow: React.FC<{ finding: Finding }> = ({ finding }) => {
 const Insights: React.FC = () => {
   const { connection, mode } = useApp();
   const [filter, setFilter] = useState<Severity | 'all'>('all');
-  const [tab, setTab] = useState<'capacity' | 'ipam' | 'wireless' | 'routing' | 'changes'>('capacity');
+  const [tab, setTab] = useState<'capacity' | 'ipam' | 'wireless' | 'routing' | 'changes' | 'alerts'>('capacity');
 
   const query = useQuery({
     queryKey: ['insights'],
@@ -332,6 +333,7 @@ const Insights: React.FC = () => {
               { value: 'wireless', label: 'Wireless', icon: 'Wifi' },
               { value: 'routing', label: 'Routing', icon: 'Route' },
               { value: 'changes', label: 'Changes', icon: 'GitCompare' },
+              { value: 'alerts', label: 'Alerts', icon: 'BellRing' },
             ]}
           />
 
@@ -495,6 +497,8 @@ const Insights: React.FC = () => {
               )}
             </div>
           )}
+
+          {tab === 'alerts' && <AlertsPanel />}
         </>
       )}
     </div>
