@@ -28,6 +28,8 @@ interface Store {
 const DEFAULT_SCHEDULE: ReportSchedule = { enabled: false, everyHours: 24, includeTraffic: true };
 
 let store: Store | null = null;
+/** True once a store file was actually read — a boot-time read must not block seeding. */
+let loadedFromDisk = false;
 let counter = 0;
 
 const load = (): Store => {
@@ -39,6 +41,7 @@ const load = (): Store => {
       events: Array.isArray(parsed.events) ? parsed.events : [],
       schedule: { ...DEFAULT_SCHEDULE, ...(parsed.schedule ?? {}) },
     };
+    loadedFromDisk = true;
   } catch {
     store = { rules: [], events: [], schedule: { ...DEFAULT_SCHEDULE } };
   }
@@ -117,10 +120,15 @@ const demoSeed = (): Store => {
   };
 };
 
-/** Seeds the starter set once, on a device that has no alerts store yet. */
+/**
+ * Seeds the starter set once, on a device that has no alerts store yet. Called on the
+ * first alerts read: the scheduler may already have loaded an empty store at boot, so
+ * only a store that came *from disk* (or an existing file) counts as "has rules".
+ */
 export const seedDemoAlerts = (): void => {
-  if (store || fs.existsSync(FILE)) return;
+  if (loadedFromDisk || fs.existsSync(FILE)) return;
   store = demoSeed();
+  loadedFromDisk = true;
   persist();
 };
 
