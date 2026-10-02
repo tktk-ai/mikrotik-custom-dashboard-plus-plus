@@ -36,7 +36,8 @@ from PySide6.QtWebEngineWidgets import QWebEngineView  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
 BASE = os.environ.get('SHOT_BASE', 'http://127.0.0.1:8787')
-OUT = os.environ.get('SHOT_OUT', os.path.join(os.path.dirname(__file__), '..', '..', 'ui-preview'))
+# Absolute, normalised: Chromium's PDF writer mishandles paths containing '..'.
+OUT = os.path.abspath(os.environ.get('SHOT_OUT', os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'ui-preview')))
 CSS_WIDTH, CSS_HEIGHT = 1600, 2000        # CSS px per printed page
 PT = 72.0 / 96.0                          # CSS px -> points
 ZOOM = 1.25                               # PDF -> PNG scale
@@ -77,6 +78,14 @@ def content_rows(pix) -> int:
     return min(pix.height, last + 12)
 
 
+def crop_rows(pix, rows: int):
+    """Return a pixmap with only the first `rows` pixel rows (PyMuPDF has no clip ctor)."""
+    if rows >= pix.height:
+        return pix
+    data = pix.samples[: pix.width * rows * pix.n]
+    return pymupdf.Pixmap(pix.colorspace, pix.width, rows, data, pix.alpha)
+
+
 def stack_pdf(path: str, out_png: str, max_height: int = 7000) -> tuple[int, int]:
     """Stack printed pages into one tall image, dropping blank trailing pages — the
     app is a fixed-height layout, so anything past page 1 is empty background."""
@@ -91,7 +100,7 @@ def stack_pdf(path: str, out_png: str, max_height: int = 7000) -> tuple[int, int
         height = min(rows, max_height - used)
         if height <= 0:
             break
-        parts.append(pymupdf.Pixmap(pix, pymupdf.IRect(0, 0, pix.width, height)) if height < pix.height else pix)
+        parts.append(crop_rows(pix, height))
         used += height
     if not parts:
         raise RuntimeError(f'{path}: no content found')
@@ -140,7 +149,7 @@ def main() -> None:
             QTimer.singleShot(2500, settle.quit)                      # let the UI react
             settle.exec()
 
-        pdf_path = os.path.join(OUT, '.tmp.pdf')
+        pdf_path = os.path.join(OUT, 'ui-shot.tmp.pdf')
         layout = QPageLayout(
             QPageSize(QSizeF(CSS_WIDTH * PT, CSS_HEIGHT * PT), QPageSize.Unit.Point),
             QPageLayout.Orientation.Portrait,

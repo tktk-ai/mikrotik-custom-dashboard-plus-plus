@@ -81,20 +81,53 @@ def undefined_symbols(path: str) -> list[tuple[str, str | None]]:
     return found
 
 
+def version_needs(path: str) -> dict[str, set[str]]:
+    """Versions each object *requires* from the libraries it links (readelf -V).
+
+    The loader matches these markers exactly, so a stub must define the version nodes
+    even when no symbol from that library is actually referenced.
+    """
+    text = subprocess.run(['readelf', '-V', '-W', path], capture_output=True, text=True).stdout
+    requires: dict[str, set[str]] = collections.defaultdict(set)
+    current = None
+    for line in text.splitlines():
+        file_match = re.search(r'File:\s*(\S+)', line)
+        if file_match:
+            current = file_match.group(1).rstrip(',')
+        name_match = re.search(r'Name:\s*(\S+)', line)
+        if name_match and current:
+            requires[current].add(name_match.group(1))
+    return requires
+
+
 def main() -> None:
     out_dir = sys.argv[1] if len(sys.argv) > 1 else '/tmp/stub'
     os.makedirs(out_dir, exist_ok=True)
     symbols: dict[str, dict[str, str | None]] = collections.defaultdict(dict)
+    referenced: set[str] = set()
+    required_versions: dict[str, set[str]] = collections.defaultdict(set)
 
     for obj in elf_objects():
         targets = needed(obj) & set(PROVIDERS)
         if not targets:
             continue
+        referenced |= targets
         for name, version in undefined_symbols(obj):
             for lib in targets:
                 if any(re.match(pattern, name) for pattern in PROVIDERS[lib]):
                     symbols[lib].setdefault(name, version)
                     break
+
+    # A library can be a NEEDED entry with no symbols reaching it from the objects we
+    # scanned (the loader still wants the file): make sure every referenced one exists.
+    for lib in referenced:
+        symbols.setdefault(lib, {})
+
+    # Version markers the objects demand from those libraries, symbol or not.
+    for obj in elf_objects():
+        for lib, versions in version_needs(obj).items():
+            if lib in symbols:
+                required_versions[lib] |= versions
 
     written = 0
     for lib, table in sorted(symbols.items()):
@@ -102,11 +135,20 @@ def main() -> None:
         c_path, map_path = f'{out_dir}/{base}.c', f'{out_dir}/{base}.map'
         with open(c_path, 'w') as fh:
             fh.write('/* Generated stubs — never called on the offscreen rendering path. */\n')
+            if not table:
+                # A NEEDED entry with no symbols reaching it from anything we scanned:
+                # one anchor keeps the version script valid.
+                fh.write('void __stub_anchor(void) {}\n')
             for sym in table:
                 fh.write(f'void {sym}(void) {{}}\n')
         by_version: dict[str, list[str]] = collections.defaultdict(list)
         for sym, version in table.items():
             by_version[version or 'STUB_BASE'].append(sym)
+        if not table:
+            by_version['STUB_BASE'] = ['__stub_anchor']
+        for version in required_versions.get(lib, set()):
+            if version not in by_version:
+                by_version[version] = ['__stub_anchor']
         with open(map_path, 'w') as fh:
             for version, names in by_version.items():
                 fh.write(f'{version} {{\n  global:\n')
