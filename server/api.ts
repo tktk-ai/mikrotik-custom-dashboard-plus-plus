@@ -10,6 +10,8 @@ import { buildInsights } from './analytics/insights';
 import { buildTraffic } from './analytics/traffic';
 import { isRandomisedMac, vendorForMac } from '../shared/oui';
 import { resetSnapshots } from './analytics/snapshot';
+import { readScoreTrend, resetScoreHistory } from './analytics/history';
+import { insightsReportMarkdown } from './analytics/report';
 import { RosError, normalizeList, rosRequest } from './routeros';
 import { clearCapabilities, getCapabilities, testConnection } from './probe';
 import {
@@ -215,6 +217,43 @@ router.get('/insights', async (req, res) => {
   }
 });
 
+/** Score history without touching the device — cheap enough for a dashboard poll. */
+router.get('/insights/history', (_req, res) => {
+  ok(res, readScoreTrend(activeKey()));
+});
+
+/**
+ * Shareable audit report. `format=md` (default) renders Markdown for a ticket or
+ * change request; `format=json` returns the bundle plus its rendered text so other
+ * tooling can consume it.
+ */
+router.get('/insights/report', async (req, res) => {
+  const conn = getActiveConnection();
+  if (!conn) return fail(res, 400, 'validation', 'No device connection configured.');
+  try {
+    const includeTraffic = req.query.traffic === 'true';
+    const fetched = await fetchPaths(includeTraffic ? [...INSIGHT_PATHS, ...TRAFFIC_PATHS] : [...INSIGHT_PATHS]);
+    const bundle = buildInsights(fetched, analyticsMode(), includeTraffic, activeKey());
+    const report = insightsReportMarkdown(bundle, {
+      connection: conn.name,
+      mode: analyticsMode(),
+      history: bundle.history ?? readScoreTrend(activeKey()),
+    });
+
+    if (req.query.format === 'json') return ok(res, { bundle, report });
+
+    const stamp = new Date().toISOString().slice(0, 10);
+    res.setHeader('Content-Type', 'text/markdown; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-store');
+    if (req.query.download === 'true') {
+      res.setHeader('Content-Disposition', `attachment; filename="network-health-${stamp}.md"`);
+    }
+    res.send(report);
+  } catch (err) {
+    sendError(res, err);
+  }
+});
+
 router.get('/traffic', async (_req, res) => {
   const conn = getActiveConnection();
   if (!conn) return fail(res, 400, 'validation', 'No device connection configured.');
@@ -400,6 +439,7 @@ router.post('/console', async (req, res) => {
 router.post('/demo/reset', (_req, res) => {
   resetDemo();
   resetSnapshots();
+  resetScoreHistory();
   pushLog('system,info', 'demo device reset from dashboard');
   ok(res, { reset: true });
 });

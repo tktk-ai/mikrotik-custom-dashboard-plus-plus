@@ -8,7 +8,7 @@ import { useQuery } from '@tanstack/react-query';
 import { Link } from 'react-router-dom';
 import clsx from 'clsx';
 import {
-  SEVERITY_ORDER, parseBytes, type CapacityRow, type Finding, type Severity,
+  SEVERITY_ORDER, parseBytes, type CapacityRow, type Finding, type ScoreTrend, type Severity,
 } from '@shared/analytics';
 import type { Row } from '@shared/types';
 import { api, ApiError } from '../lib/api';
@@ -16,10 +16,73 @@ import { useApp } from '../lib/store';
 import { fmtBitrate, fmtBytes, fmtNumber, relativeTime } from '../lib/format';
 import { DataTable, type ColumnDef } from '../components/DataTable';
 import { EmptyState, Icon, Segmented, Spinner, Stat, TableSkeleton } from '../components/ui';
-import { Gauge } from '../components/charts';
+import { Gauge, Sparkline } from '../components/charts';
 import { LinkChip, ModeChip, SEVERITY_DOT, SeverityChip, SignalBars, UtilBar } from '../components/network';
 
 const asRows = <T,>(items: T[]): Row[] => items as unknown as Row[];
+
+/** Signed movement in the health score, e.g. "+11 · 30d". */
+const DeltaChip: React.FC<{ delta: number | null; label: string }> = ({ delta, label }) => {
+  if (delta === null || delta === undefined) return null;
+  const up = delta > 0;
+  return (
+    <span className={clsx('chip', delta === 0 ? 'chip-neutral' : up ? 'chip-good' : 'chip-bad')}>
+      <Icon name={delta === 0 ? 'Minus' : up ? 'TrendingUp' : 'TrendingDown'} size={11} />
+      {up ? '+' : ''}{delta} · {label}
+    </span>
+  );
+};
+
+/** Score over time: the strategic half — is the network getting better or worse? */
+const ScoreHistory: React.FC<{ history?: ScoreTrend | null }> = ({ history }) => {
+  if (!history || history.samples.length < 2) return null;
+  const series = history.samples.map((sample) => sample.overall);
+  const tone = history.direction === 'up' ? 'good' : history.direction === 'down' ? 'bad' : 'brand';
+  const moved = history.components.filter((component) => component.delta !== 0);
+
+  return (
+    <section className="card p-4">
+      <div className="mb-2 flex flex-wrap items-center gap-2">
+        <Icon name="Activity" size={15} className="text-brand" />
+        <span className="text-[13px] font-semibold text-ink">Score history</span>
+        <span className="text-[11px] text-faint">
+          {history.total} samples{history.deltaDays ? ` over ${history.deltaDays} days` : ''}
+          {history.first ? ` · since ${relativeTime(history.first.at)}` : ''}
+        </span>
+        {history.source === 'demo' ? (
+          <span className="chip chip-neutral" title="The demo device has no real past — this series is simulated so the trend UI is visible.">simulated</span>
+        ) : null}
+        <div className="ml-auto flex items-center gap-2">
+          {history.newFindings > 0 ? <span className="chip chip-warn">{history.newFindings} new since last sample</span> : null}
+          <DeltaChip delta={history.delta} label={history.deltaDays ? `${history.deltaDays}d` : 'all'} />
+          {history.delta24h !== null && history.delta24h !== history.delta ? <DeltaChip delta={history.delta24h} label="24h" /> : null}
+        </div>
+      </div>
+
+      <Sparkline
+        data={series}
+        tone={tone}
+        height={58}
+        className="w-full"
+      />
+      <div className="mt-1 flex justify-between text-[10.5px] text-faint">
+        <span>{history.first ? Math.round(series[0]) : ''} at start</span>
+        <span>now {history.last?.overall ?? ''}/100</span>
+      </div>
+
+      {moved.length > 0 && (
+        <div className="mt-3 flex flex-wrap gap-1.5 border-t border-line/60 pt-3">
+          {moved.map((component) => (
+            <span key={component.id} className="chip chip-neutral" title={`${component.before} → ${component.now}`}>
+              {component.label}
+              <b className={component.delta > 0 ? 'text-good' : 'text-bad'}>{component.delta > 0 ? '+' : ''}{component.delta}</b>
+            </span>
+          ))}
+        </div>
+      )}
+    </section>
+  );
+};
 
 /** Interface counters are cumulative; derive bps from consecutive reads. */
 function useCounterRates(rows: CapacityRow[] | undefined) {
@@ -167,6 +230,14 @@ const Insights: React.FC = () => {
         </div>
         <div className="ml-auto flex items-center gap-2">
           <ModeChip mode={mode ?? undefined} />
+          <a
+            className="btn btn-sm"
+            href="/api/insights/report?format=md&traffic=true&download=true"
+            title="Download this analysis as a Markdown report (score, findings, remediation, capacity, drift)"
+          >
+            <Icon name="FileDown" size={13} />
+            Report
+          </a>
           <button className="btn btn-sm btn-primary" onClick={() => query.refetch()} disabled={query.isFetching}>
             {query.isFetching ? <Spinner className="size-3.5" /> : <Icon name="RefreshCw" size={13} />}
             Re-analyse
@@ -232,6 +303,8 @@ const Insights: React.FC = () => {
               )}
             </section>
           </div>
+
+          <ScoreHistory history={insights.history} />
 
           <div className="flex flex-wrap items-center gap-2">
             <Segmented

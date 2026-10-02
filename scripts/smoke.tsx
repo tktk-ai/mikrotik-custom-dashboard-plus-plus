@@ -46,7 +46,7 @@ const ROUTES: Expectation[] = [
   // analytics pages
   { route: '/topology', expect: ['Network map', 'Devices', 'Legend'] },
   { route: '/devices', expect: ['Devices', 'Vendors'] },
-  { route: '/insights', expect: ['Insights', 'Score breakdown'] },
+  { route: '/insights', expect: ['Insights', 'Score breakdown', 'Score history'] },
   { route: '/traffic', expect: ['Traffic', 'Application classes', 'Tracked flows'] },
 ];
 
@@ -213,10 +213,36 @@ async function main() {
     await sleep(50);
   }
 
+  /* --------------------------- API checks --------------------------- */
+  const API_CHECKS: Array<{ name: string; path: string; expect: string[] }> = [
+    { name: 'report (markdown)', path: '/api/insights/report?traffic=true', expect: ['# Network health report', '## Findings', 'Health score', 'Deep packet inspection'] },
+    { name: 'report (json)', path: '/api/insights/report?format=json', expect: ['"bundle"', '"report"'] },
+    { name: 'score history', path: '/api/insights/history', expect: ['"samples"', '"overall"'] },
+    { name: 'topology devices', path: '/api/topology', expect: ['"nodes"', '"stats"'] },
+    { name: 'traffic flows', path: '/api/traffic', expect: ['"totalFlows"', '"payloadInspection":false'] },
+  ];
+  realError('');
+  for (const check of API_CHECKS) {
+    try {
+      const response = await fetch(`${API}${check.path}`);
+      const text = await response.text();
+      const missing = check.expect.filter((needle) => !text.includes(needle));
+      if (!response.ok || missing.length) {
+        failures.push(check.path);
+        realError(`[FAIL] api ${check.name.padEnd(20)} status=${response.status} missing=${JSON.stringify(missing)}`);
+      } else {
+        realError(`[ ok ] api ${check.name.padEnd(20)} ${(text.length / 1024).toFixed(1)} kB`);
+      }
+    } catch (err) {
+      failures.push(check.path);
+      realError(`[FAIL] api ${check.name.padEnd(20)} ${String(err).slice(0, 120)}`);
+    }
+  }
+
   console.error = realError;
   console.warn = realWarn;
-  const total = ROUTES.length + INTERACTIONS.length;
-  realError(`\n${total - failures.length}/${total} checks passed (${ROUTES.length} routes, ${INTERACTIONS.length} interactions).`);
+  const total = ROUTES.length + INTERACTIONS.length + API_CHECKS.length;
+  realError(`\n${total - failures.length}/${total} checks passed (${ROUTES.length} routes, ${INTERACTIONS.length} interactions, ${API_CHECKS.length} API).`);
   if (failures.length) realError(`failed: ${failures.join(', ')}`);
   process.exit(failures.length ? 1 : 0);
 }

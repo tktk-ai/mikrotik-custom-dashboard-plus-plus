@@ -298,6 +298,33 @@ export interface ChangeDiff {
   sections: ChangeSection[];
 }
 
+/** One stored score reading — see `server/analytics/history.ts`. */
+export interface ScoreSample {
+  at: number;
+  overall: number;
+  grade: string;
+  components: Record<string, number>;
+  findings: { critical: number; high: number; medium: number; low: number; info: number };
+  devices: number;
+  /** `demo` samples are simulated history; `live` ones were really observed. */
+  source: 'demo' | 'live';
+}
+
+export interface ScoreTrend {
+  connectionId: string;
+  samples: ScoreSample[];
+  source: 'demo' | 'live';
+  total: number;
+  first: ScoreSample | null;
+  last: ScoreSample | null;
+  delta: number | null;
+  deltaDays: number | null;
+  delta24h: number | null;
+  direction: 'up' | 'down' | 'flat';
+  components: Array<{ id: string; label: string; now: number; before: number; delta: number }>;
+  newFindings: number;
+}
+
 export interface InsightBundle {
   mode: string;
   generatedAt: number;
@@ -317,6 +344,8 @@ export interface InsightBundle {
   queues: { count: number; shapedBps: number; wanBps: number; oversubscription: number; idle: number };
   changes: ChangeDiff | null;
   traffic: TrafficBundle | null;
+  /** Score history — null until the first read has been recorded. */
+  history?: ScoreTrend | null;
   notes: string[];
   sources: Array<{ path: string; ok: boolean; rows: number; error?: string }>;
 }

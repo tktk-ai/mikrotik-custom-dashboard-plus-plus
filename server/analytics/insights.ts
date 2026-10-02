@@ -17,6 +17,7 @@ import { buildSegments, resolveWanInterface } from './topology';
 import { buildDevices } from './devices';
 import { buildTraffic } from './traffic';
 import { recordSnapshot } from './snapshot';
+import { recordScoreSample } from './history';
 
 const text = (v: unknown) => (v === undefined || v === null || v === '' ? undefined : String(v));
 const num = (v: unknown, fallback = 0) => {
@@ -876,7 +877,7 @@ export function buildInsights(fetched: Map<string, Fetched>, mode: string, inclu
   if (!list(tables, 'ip/firewall/filter').length && mode === 'live') notes.push('Firewall filter rules were not readable — grant read permission to cover the security checks.');
   if (mode === 'live') notes.push('Counters on a real device are cumulative since the last counter reset; rates and trends are computed from successive reads.');
 
-  return {
+  const bundle: InsightBundle = {
     mode,
     generatedAt: Date.now(),
     score: { overall, grade: overall >= 90 ? 'A' : overall >= 80 ? 'B' : overall >= 70 ? 'C' : overall >= 55 ? 'D' : 'E', components },
@@ -892,5 +893,9 @@ export function buildInsights(fetched: Map<string, Fetched>, mode: string, inclu
     notes,
     sources: reports(fetched),
   };
+
+  // Feed the score series, then hand the caller the trend it belongs to.
+  bundle.history = recordScoreSample(bundle, connectionId);
+  return bundle;
 }
 

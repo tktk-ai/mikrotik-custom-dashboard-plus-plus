@@ -31,7 +31,12 @@ without any hardware.
   remediation steps, raw evidence and a deep link to the menu that fixes it. Plus capacity/oversubscription maths,
   IPAM & DHCP-pool exhaustion, wireless airtime and weak-client analysis, route-source/BGP/OSPF health and queue
   shaping. Includes a snapshot differ that reports exactly which firewall, NAT, route, DHCP, user or interface
-  sections drifted since the baseline.
+  sections drifted since the baseline. Every read also feeds a **persisted score history** (`data/analytics-history.json`),
+  so the page shows whether the network is trending up or down — overall and per component — instead of a single number.
+- **Shareable audit report** — one click renders the whole analysis as Markdown (`/api/insights/report`): executive
+  summary, score breakdown with trends, findings with remediation and evidence, capacity/IPAM/wireless/routing detail,
+  configuration drift since the baseline, the DPI caveat and a coverage/caveat section listing menus that could not be
+  read. `?format=json` returns the same thing for automation; `?download=true` saves it as a file.
 - **Detailed network map** — the device inventory is merged from DHCP leases → ARP → IPv6 neighbours → bridge hosts →
   wireless registrations → PPP/queue/conntrack evidence and grouped by MAC, resolved to vendor via a built-in OUI
   table. The topology page lays that out as a layered map (internet → uplink → router → bridges/VLANs/tunnels →
@@ -109,7 +114,7 @@ Copy `.env.example` to `.env` (loaded by `tsx`/Vite where applicable) or export 
 ```
 shared/           types.ts + catalog/ — the single source of truth the server AND UI render from
 server/           Express API: routeros.ts (REST client), store.ts (profiles), probe.ts, demo/ (simulated device)
-server/analytics/ Insights, topology, device inventory and traffic collectors (live + demo) behind /api/*
+server/analytics/ Insights, topology, device inventory, traffic collectors, score history and report rendering
 src/              React UI: components/ (table, forms, charts, shell), pages/, lib/ (api client, store, formatting)
 scripts/smoke.tsx Headless jsdom smoke test: renders every page against the running API and asserts real data
 scripts/gen-icons.mjs Regenerates the tree-shakeable lucide icon registry after adding new icon names
@@ -123,6 +128,8 @@ scripts/gen-icons.mjs Regenerates the tree-shakeable lucide icon registry after 
 | `GET /api/dashboard` | metrics bundle for the overview page |
 | `GET /api/insights` | score, findings, capacity, IPAM, wireless, routing, queues (`?traffic=true` adds flows) |
 | `POST /api/insights/snapshot` | record a baseline; later reads return a section-by-section config diff |
+| `GET /api/insights/history` | persisted score series with per-component deltas (device is not touched) |
+| `GET /api/insights/report` | Markdown/JSON audit report of the current analysis (`?traffic=true`, `?download=true`) |
 | `GET /api/topology` | layered node/link map, segment stats, discovery sources |
 | `GET /api/traffic` | application classes, protocol mix, talkers, conversations, DPI capability report |
 | `GET /api/device/:ip` | single-host probe: ping, PTR, lease, vendor, platform and evidence |
@@ -139,7 +146,7 @@ scripts/gen-icons.mjs Regenerates the tree-shakeable lucide icon registry after 
 | `npm run build` | Production bundle into `dist/` |
 | `npm start` / `npm run serve` | Serve API + built UI (serve = build then start) |
 | `npm run typecheck` | `tsc --noEmit` over server, shared, scripts and UI |
-| `npm run smoke` | Renders the real app inside jsdom across 31 routes plus 5 click-through interactions against the running API, asserting live data and zero console errors (needs `npm run dev:api`) |
+| `npm run smoke` | Renders the real app inside jsdom across 31 routes, 5 click-through interactions and 5 API checks against the running API, asserting live data and zero console errors (needs `npm run dev:api`) |
 | `node scripts/gen-icons.mjs` | Rebuild `src/components/iconRegistry.tsx` (explicit icon imports — keeps the main bundle ~124 kB gzipped instead of ~250 kB) |
 
 ## Verification
@@ -159,10 +166,11 @@ no data, hits an error state, or logs a console error/warning:
 [ ok ] /                           6762 chars
 [ ok ] /m/ip/firewall/filter       5301 chars
 [ ok ] /topology                    6697 chars
-[ ok ] /insights                    6053 chars
+[ ok ] /insights                    6587 chars
 [ ok ] /traffic                     4977 chars
 ...
-36/36 checks passed (31 routes, 5 interactions).
+[ ok ] api report (markdown)        7.4 kB
+41/41 checks passed (31 routes, 5 interactions, 5 API).
 ```
 
 ## Security notes
