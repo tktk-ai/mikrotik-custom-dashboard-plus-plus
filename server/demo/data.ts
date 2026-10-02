@@ -1063,7 +1063,9 @@ export function buildState(): DemoState {
     const mac = leaseMacByIp.get(String(row.address ?? ''));
     if (mac) row['mac-address'] = mac;
   }
-  // Neighbour discovery is authoritative for addresses without a lease.
+  // Neighbour discovery is authoritative for addresses without a lease: an ARP entry
+  // that disagrees with the discovered device on the same address would otherwise be
+  // reported as an IP conflict that does not exist.
   const neighborMacByIp = new Map(t['ip/neighbor'].map((r) => [String(r.address), String(r['mac-address'])]));
   for (const row of t['ip/arp'] ?? []) {
     const mac = neighborMacByIp.get(String(row.address ?? ''));

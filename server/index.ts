@@ -1,7 +1,7 @@
 import express from 'express';
 import fs from 'node:fs';
 import path from 'node:path';
-import api from './api';
+import api, { runScheduledReports } from './api';
 
 /**
  * RouterOS Control Plane server.
@@ -54,6 +54,19 @@ app.use((err: any, _req: express.Request, res: express.Response, _next: express.
   console.error('[server] unhandled:', err?.stack ?? err);
   res.status(500).json({ error: { kind: 'internal', message: err?.message ?? 'Internal error' } });
 });
+
+/**
+ * Scheduled reports: a five-minute tick is plenty of resolution for an hourly or
+ * daily report, and it costs nothing when no schedule is configured.
+ */
+const REPORT_TICK_MS = 5 * 60 * 1000;
+setInterval(() => {
+  void runScheduledReports();
+}, REPORT_TICK_MS).unref();
+// Check once shortly after boot so a restart does not delay a due report by five minutes.
+setTimeout(() => {
+  void runScheduledReports();
+}, 20_000).unref();
 
 const server = app.listen(PORT, HOST, () => {
   const demo = process.env.ROUTEROS_HOST ? 'live + demo' : 'demo device';

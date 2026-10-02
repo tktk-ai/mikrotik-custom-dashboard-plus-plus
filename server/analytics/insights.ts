@@ -17,7 +17,7 @@ import { buildSegments, resolveWanInterface } from './topology';
 import { buildDevices } from './devices';
 import { buildTraffic } from './traffic';
 import { recordSnapshot } from './snapshot';
-import { recordScoreSample } from './history';
+import { recordLinkSamples, recordScoreSample } from './history';
 
 const text = (v: unknown) => (v === undefined || v === null || v === '' ? undefined : String(v));
 const num = (v: unknown, fallback = 0) => {
@@ -893,6 +893,10 @@ export function buildInsights(fetched: Map<string, Fetched>, mode: string, inclu
     notes,
     sources: reports(fetched),
   };
+
+  // Turn cumulative counters into rates (mutates capacity) and keep the throughput
+  // series, so link drill-downs have history without polling from the browser.
+  recordLinkSamples(bundle, connectionId);
 
   // Feed the score series, then hand the caller the trend it belongs to.
   bundle.history = recordScoreSample(bundle, connectionId);

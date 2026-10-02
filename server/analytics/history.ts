@@ -13,13 +13,21 @@
  */
 import fs from 'node:fs';
 import path from 'node:path';
-import type { InsightBundle, ScoreSample, ScoreTrend } from '../../shared/analytics';
+import type { CapacityRow, InsightBundle, LinkHistory, ScoreSample, ScoreTrend } from '../../shared/analytics';
 
 export type { ScoreSample, ScoreTrend };
+
+export interface LinkSample {
+  at: number;
+  /** interface name → cumulative byte counters at that instant. */
+  counters: Record<string, { rx: number; tx: number }>;
+}
 
 interface Store {
   connectionId: string;
   samples: ScoreSample[];
+  /** Interface throughput series, recorded on every analytics read. */
+  links?: LinkSample[];
 }
 
 const DATA_DIR = process.env.DATA_DIR || path.resolve(process.cwd(), 'data');
@@ -30,6 +38,10 @@ const SAMPLE_INTERVAL_MS = 5 * 60 * 1000;
 const MAX_SAMPLES = 2000;
 /** How many samples the API returns. */
 const PAYLOAD_SAMPLES = 240;
+/** Link samples: 5 min apart → 720 points is ~2.5 days of throughput history. */
+const MAX_LINK_SAMPLES = 720;
+/** Interfaces worth keeping in the series (the rest are noise). */
+const LINK_SERIES_LIMIT = 24;
 
 let store: Store | null = null;
 
@@ -43,6 +55,180 @@ function load(): Store | null {
     /* no history yet */
   }
   return store;
+}
+
+/**
+ * Turns cumulative interface counters into rates, appends them to the series and
+ * writes the rates back onto the bundle so the caller can show real bps on the
+ * first read instead of waiting for a second one.
+ */
+export function recordLinkSamples(bundle: InsightBundle, connectionId = 'active'): Record<string, { rx: number; tx: number }> {
+  const counters: Record<string, { rx: number; tx: number }> = {};
+  const names: string[] = [];
+  for (const row of bundle.capacity.interfaces) {
+    counters[row.interface] = { rx: row.rxBytes, tx: row.txBytes };
+    names.push(row.interface);
+  }
+  const rates = appendLinkSample(counters, bundle.mode, connectionId, names);
+
+  // Apply: a device's own counters stay authoritative, rates come from the delta.
+  let totalRx = 0;
+  let totalTx = 0;
+  for (const row of bundle.capacity.interfaces) {
+    const rate = rates[row.interface];
+    const rx = rate?.rx ?? 0;
+    const tx = rate?.tx ?? 0;
+    row.rxRate = rx;
+    row.txRate = tx;
+    row.utilisation = row.speedBps ? Math.min(100, Math.round((Math.max(rx, tx) * 8 / row.speedBps) * 100)) : row.utilisation;
+    row.status = !row.status || row.status === 'down' ? row.status : row.utilisation > 85 ? 'hot' : row.status;
+    totalRx += rx;
+    totalTx += tx;
+  }
+  bundle.capacity.totalRx = totalRx;
+  bundle.capacity.totalTx = totalTx;
+  if (bundle.capacity.wan) {
+    const speed = bundle.capacity.wan.speedBps;
+    bundle.capacity.headroom = speed ? Math.max(0, 100 - Math.round((Math.max(bundle.capacity.wan.rxRate, bundle.capacity.wan.txRate) * 8 / speed) * 100)) : bundle.capacity.headroom;
+  }
+  return rates;
+}
+
+/** Shared append path: seed demo history, compute rates, cap the series, persist. */
+function appendLinkSample(
+  counters: Record<string, { rx: number; tx: number }>,
+  mode: string,
+  connectionId: string,
+  names: string[],
+): Record<string, { rx: number; tx: number }> {
+  const now = Date.now();
+  const existing = load();
+  let samples: LinkSample[] = existing?.connectionId === connectionId ? (existing.links ?? []) : [];
+  const seeded = !samples.length && mode === 'demo';
+  if (seeded) samples = seedLinkSamplesFrom(counters);
+
+  const previous = samples.at(-1);
+  const seconds = previous ? (now - previous.at) / 1000 : 0;
+  const rates: Record<string, { rx: number; tx: number }> = {};
+  const busiest = [...names].sort((a, b) => (counters[b].rx + counters[b].tx) - (counters[a].rx + counters[a].tx)).slice(0, LINK_SERIES_LIMIT);
+  for (const name of busiest) {
+    const before = previous?.counters[name];
+    if (before && seconds > 0) {
+      rates[name] = {
+        rx: Math.max(0, counters[name].rx - before.rx) / seconds,
+        tx: Math.max(0, counters[name].tx - before.tx) / seconds,
+      };
+    }
+  }
+
+  const nextSamples = seeded || !previous || now - previous.at >= 60_000
+    ? [...samples.slice(-(MAX_LINK_SAMPLES - 1)), { at: now, counters }]
+    : [...samples.slice(0, -1), { at: now, counters }];
+  persist({
+    connectionId,
+    samples: existing?.connectionId === connectionId ? existing!.samples : existing?.samples ?? [],
+    links: nextSamples,
+  });
+  return rates;
+}
+
+/** Throughput series for one interface, newest last. */
+export function readLinkHistory(connectionId: string, iface: string, hours = 6): LinkHistory {
+  const existing = load();
+  const samples = existing?.connectionId === connectionId ? (existing.links ?? []) : [];
+  const since = Date.now() - hours * 60 * 60 * 1000;
+  const points: Array<{ at: number; rx: number; tx: number }> = [];
+  for (let i = 1; i < samples.length; i++) {
+    const before = samples[i - 1];
+    const current = samples[i];
+    const seconds = (current.at - before.at) / 1000;
+    const from = before.counters[iface];
+    const to = current.counters[iface];
+    if (!from || !to || seconds <= 0 || current.at < since) continue;
+    points.push({
+      at: current.at,
+      rx: Math.max(0, to.rx - from.rx) / seconds,
+      tx: Math.max(0, to.tx - from.tx) / seconds,
+    });
+  }
+  const peak = points.reduce((max, point) => Math.max(max, point.rx, point.tx), 0);
+  const average = points.length ? points.reduce((sum, point) => sum + point.rx + point.tx, 0) / points.length : 0;
+  return {
+    interface: iface,
+    hours,
+    points,
+    peak,
+    average,
+    source: samples.at(-1) ? (sampleSource(samples) ?? 'live') : 'live',
+  };
+}
+
+/**
+ * Records a throughput sample from raw interface counters (no insights bundle needed),
+ * so the map's link drill-down has history even when nobody opened the Insights page.
+ */
+export function recordInterfaceCounters(
+  rows: Array<{ name: string; rxBytes: number; txBytes: number }>,
+  mode: string,
+  connectionId = 'active',
+): Record<string, { rx: number; tx: number }> {
+  const counters: Record<string, { rx: number; tx: number }> = {};
+  for (const row of rows) counters[row.name] = { rx: row.rxBytes, tx: row.txBytes };
+  return appendLinkSample(counters, mode, connectionId, rows.map((row) => row.name));
+}
+
+/** Most recent rates without recording anything (used by the topology route). */
+export function latestLinkRates(connectionId = 'active'): Record<string, { rx: number; tx: number }> {
+  const samples = load()?.connectionId === connectionId ? (load()?.links ?? []) : [];
+  const current = samples.at(-1);
+  const before = samples.at(-2);
+  if (!current || !before) return {};
+  const seconds = (current.at - before.at) / 1000;
+  if (seconds <= 0) return {};
+  const rates: Record<string, { rx: number; tx: number }> = {};
+  for (const [iface, counter] of Object.entries(current.counters)) {
+    const previous = before.counters[iface] ?? counter;
+    rates[iface] = { rx: Math.max(0, counter.rx - previous.rx) / seconds, tx: Math.max(0, counter.tx - previous.tx) / seconds };
+  }
+  return rates;
+}
+
+const sampleSource = (samples: LinkSample[]): 'demo' | 'live' | undefined => {
+  const store = load();
+  if (!store) return undefined;
+  // Link samples inherit the mode of the score series they were recorded with.
+  return store.samples.at(-1)?.source;
+};
+
+/**
+ * Demo seed: ~2.5 days of five-minute samples with a day/night shape, so the link
+ * drill-down has a history to draw before the dashboard has been open for hours.
+ */
+function seedLinkSamplesFrom(seed: Record<string, { rx: number; tx: number }>): LinkSample[] {
+  const now = Date.now();
+  const step = 5 * 60 * 1000;
+  const count = 720;
+  const carriers = Object.keys(seed)
+    .slice(0, 10)
+    .map((name, index) => ({ name, base: Math.max(4, 600 / (index + 2)) }));
+  const samples: LinkSample[] = [];
+  const counters: Record<string, { rx: number; tx: number }> = {};
+  for (const carrier of carriers) counters[carrier.name] = { rx: 0, tx: 0 };
+  for (let i = count; i >= 0; i--) {
+    const at = now - i * step;
+    const hour = new Date(at).getHours();
+    const daylight = 0.35 + 0.65 * Math.max(0, Math.sin(((hour - 5) / 24) * Math.PI * 2));
+    for (const carrier of carriers) {
+      // Bytes over the interval = rate (kB/s) × 300 s.
+      const wobble = 0.7 + 0.6 * Math.abs(Math.sin((i + carrier.base) / 7));
+      const rx = carrier.base * 1000 * daylight * wobble;
+      const tx = carrier.base * 420 * daylight * (1.4 - wobble / 2);
+      counters[carrier.name].rx += rx * 300;
+      counters[carrier.name].tx += tx * 300;
+    }
+    samples.push({ at, counters: JSON.parse(JSON.stringify(counters)) });
+  }
+  return samples;
 }
 
 function persist(next: Store) {
@@ -139,7 +325,7 @@ export function recordScoreSample(bundle: InsightBundle, connectionId = 'active'
   }
   if (samples.length > MAX_SAMPLES) samples = samples.slice(-MAX_SAMPLES);
 
-  persist({ connectionId, samples });
+  persist({ connectionId, samples, links: existing?.connectionId === connectionId ? existing.links : undefined });
   return summarise(connectionId, samples);
 }
 

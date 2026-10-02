@@ -1,16 +1,24 @@
 import express, { type Request, type Response } from 'express';
 import { getEndpoint } from '../shared/catalog';
 import type { Row } from '../shared/types';
+import type { InsightBundle } from '../shared/analytics';
 import { DemoError, getDeviceInfo, getMetrics, handleDemo, listEndpointPaths, pushLog, resetDemo, resolveEndpoint } from './demo/engine';
 import {
   INSIGHT_PATHS, TOPOLOGY_PATHS, TRAFFIC_PATHS, fetchPaths, reports, toTables,
 } from './analytics/collect';
 import { buildTopology } from './analytics/topology';
 import { buildInsights } from './analytics/insights';
+import { buildDevices } from './analytics/devices';
+import { runSweep, sweepTargets } from './analytics/sweep';
+import {
+  clearEvents, createRule, deleteRule, deliverReport, evaluateAlerts, getSchedule,
+  listEvents, listRules, reportDue, setSchedule, testWebhook, updateRule,
+} from './analytics/alerts';
+import { list } from './analytics/collect';
 import { buildTraffic } from './analytics/traffic';
 import { isRandomisedMac, vendorForMac } from '../shared/oui';
 import { resetSnapshots } from './analytics/snapshot';
-import { readScoreTrend, resetScoreHistory } from './analytics/history';
+import { latestLinkRates, readLinkHistory, readScoreTrend, recordInterfaceCounters, resetScoreHistory } from './analytics/history';
 import { insightsReportMarkdown } from './analytics/report';
 import { RosError, normalizeList, rosRequest } from './routeros';
 import { clearCapabilities, getCapabilities, testConnection } from './probe';
@@ -199,7 +207,22 @@ router.get('/topology', async (_req, res) => {
   if (!conn) return fail(res, 400, 'validation', 'No device connection configured.');
   try {
     const fetched = await fetchPaths([...TOPOLOGY_PATHS]);
-    ok(res, buildTopology(fetched, analyticsMode()));
+    const topology = buildTopology(fetched, analyticsMode());
+    // Feed the throughput series and attach live rates to the nodes that map to an
+    // interface, so the map's link drill-down has history without a visit to Insights.
+    const interfaceRows = list(toTables(fetched), 'interface').map((row) => ({
+      name: String(row.name ?? ''),
+      rxBytes: Number(row['rx-byte'] ?? 0),
+      txBytes: Number(row['tx-byte'] ?? 0),
+    })).filter((row) => row.name);
+    const rates = interfaceRows.length
+      ? recordInterfaceCounters(interfaceRows, analyticsMode(), activeKey())
+      : latestLinkRates(activeKey());
+    for (const node of topology.nodes) {
+      const iface = node.interface ?? (node.id.startsWith('if:') ? node.id.slice(3) : undefined);
+      if (iface && rates[iface]) node.rate = rates[iface];
+    }
+    ok(res, topology);
   } catch (err) {
     sendError(res, err);
   }
@@ -211,10 +234,339 @@ router.get('/insights', async (req, res) => {
   try {
     const fetched = await fetchPaths([...INSIGHT_PATHS]);
     const includeTraffic = req.query.traffic === 'true';
-    ok(res, buildInsights(fetched, analyticsMode(), includeTraffic, activeKey()));
+    const bundle = buildInsights(fetched, analyticsMode(), includeTraffic, activeKey());
+    ok(res, bundle);
+    // Fire-and-forget: the response must not wait on a webhook.
+    void evaluateAlerts(bundle, { device: conn.name }).catch(() => undefined);
   } catch (err) {
     sendError(res, err);
   }
+});
+
+/**
+ * Bulk probe: streams a result per host over SSE so the UI can show progress while
+ * the sweep is still running. Reachability is ICMP through the router; the flow
+ * counts come from conntrack, not from scanning ports (RouterOS cannot).
+ */
+router.get('/devices/sweep', async (req, res) => {
+  const conn = getActiveConnection();
+  if (!conn) return fail(res, 400, 'validation', 'No device connection configured.');
+
+  const scope = String(req.query.scope ?? 'all');
+  const limit = Math.min(200, Math.max(1, Number(req.query.limit ?? 60) || 60));
+  const concurrency = Math.min(12, Math.max(1, Number(req.query.concurrency ?? 6) || 6));
+  const includeTraffic = req.query.traffic !== 'false';
+  const demo = analyticsMode() === 'demo';
+
+  res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+  res.setHeader('Cache-Control', 'no-store');
+  res.setHeader('Connection', 'keep-alive');
+  res.flushHeaders?.();
+
+  const send = (event: string, payload: unknown) => {
+    if (res.writableEnded || res.destroyed) return;
+    res.write(`event: ${event}\ndata: ${JSON.stringify(payload)}\n\n`);
+  };
+
+  try {
+    send('status', { stage: 'collecting', scope });
+    const [topologyFetched, trafficFetched] = await Promise.all([
+      fetchPaths([...TOPOLOGY_PATHS]),
+      includeTraffic ? fetchPaths([...TRAFFIC_PATHS]) : Promise.resolve(new Map()),
+    ]);
+    const tables = toTables(topologyFetched);
+    const devices = buildDevices(tables, { interfaceLink: undefined });
+
+    // Observed conversations per address — honest "services seen", not a port scan.
+    const conversationByIp: Record<string, { flows: number; bytes: number; topService: string }> = {};
+    if (trafficFetched.size) {
+      const conversation = list(toTables(trafficFetched), 'ip/firewall/connection');
+      const byAddress = new Map<string, { flows: number; bytes: number; ports: Map<string, number> }>();
+      for (const row of conversation) {
+        const address = String(row['src-address'] ?? '').split(':')[0];
+        if (!address) continue;
+        const entry = byAddress.get(address) ?? { flows: 0, bytes: 0, ports: new Map<string, number>() };
+        entry.flows += 1;
+        entry.bytes += Number(row['orig-bytes'] ?? 0) + Number(row['repl-bytes'] ?? 0);
+        const port = String(row['dst-port'] ?? '');
+        if (port) entry.ports.set(port, (entry.ports.get(port) ?? 0) + 1);
+        byAddress.set(address, entry);
+      }
+      for (const [address, entry] of byAddress) {
+        const top = [...entry.ports.entries()].sort((a, b) => b[1] - a[1])[0];
+        conversationByIp[address] = { flows: entry.flows, bytes: entry.bytes, topService: top ? `tcp/${top[0]}` : '—' };
+      }
+    }
+
+    const targets = sweepTargets(devices, scope, conversationByIp);
+    const summary = await runSweep(targets, conn, demo, {
+      scope,
+      limit,
+      concurrency,
+      onStart: (total) => send('start', { scope, total, limit, concurrency }),
+      onResult: (result, index) => send('result', { ...result, index }),
+    });
+    send('done', summary);
+  } catch (err) {
+    send('error', { message: err instanceof Error ? err.message : 'sweep failed' });
+  } finally {
+    res.end();
+  }
+});
+
+/* ------------------------------------------------------------------ *
+ * DPI tooling — the write side of the traffic story.
+ *
+ * Everything here stays inside what RouterOS can actually do: create a layer7
+ * matcher, attach it to a mangle rule with a packet mark, run the sniffer, and
+ * list the capture files it produced. Payload decoding still happens off-box.
+ * ------------------------------------------------------------------ */
+
+/** Performs a REST write in whichever mode is active (demo mutates its own tables). */
+const restWrite = async (conn: NonNullable<ReturnType<typeof getActiveConnection>>, path: string, body: Row, method: 'POST' | 'PATCH' | 'PUT' = 'POST'): Promise<Row> => {
+  if (conn.demo) {
+    const result = handleDemo({ method, path, body, query: new URLSearchParams() });
+    const list = Array.isArray(result) ? result : [result];
+    return (list.at(-1) ?? {}) as Row;
+  }
+  const response = await rosRequest(conn, path, method, body);
+  return (Array.isArray(response.data) ? (response.data.at(-1) ?? {}) : response.data ?? {}) as Row;
+};
+
+const NAME_RE = /^[A-Za-z0-9._-]{1,63}$/;
+
+/** Creates a layer7 matcher — the closest thing to on-box application detection. */
+router.post('/traffic/l7', async (req, res) => {
+  const conn = getActiveConnection();
+  if (!conn) return fail(res, 400, 'validation', 'No device connection configured.');
+  const body = (req.body ?? {}) as Row;
+  const name = String(body.name ?? '').trim();
+  const regexp = String(body.regexp ?? '').trim();
+  if (!NAME_RE.test(name)) return fail(res, 400, 'validation', 'Name must be 1-63 characters of letters, digits, dot, dash or underscore.');
+  if (!regexp || regexp.length > 512) return fail(res, 400, 'validation', 'Provide a regular expression (1-512 characters).');
+  try {
+    // Sanity check only: RouterOS uses its own regex engine, but a pattern that is
+    // not valid in any common dialect is almost certainly a typo.
+    new RegExp(regexp);
+  } catch {
+    return fail(res, 400, 'validation', 'That regular expression does not compile — check for unbalanced groups or brackets.');
+  }
+
+  try {
+    const row = await restWrite(conn, 'ip/firewall/layer7-protocol', {
+      name,
+      regexp,
+      comment: body.comment ? String(body.comment) : 'created from dashboard',
+    });
+    ok(res, { created: true, row, mode: analyticsMode() });
+  } catch (err) {
+    sendError(res, err);
+  }
+});
+
+/** Attaches a matcher to a mangle rule that marks the matching packets. */
+router.post('/traffic/mangle', async (req, res) => {
+  const conn = getActiveConnection();
+  if (!conn) return fail(res, 400, 'validation', 'No device connection configured.');
+  const body = (req.body ?? {}) as Row;
+  const matcher = String(body.matcher ?? '').trim();
+  const chain = String(body.chain ?? 'prerouting');
+  if (!NAME_RE.test(matcher)) return fail(res, 400, 'validation', 'Pick a layer7 matcher to reference.');
+  if (!['prerouting', 'forward', 'output', 'postrouting', 'input'].includes(chain)) return fail(res, 400, 'validation', 'Unsupported chain.');
+
+  try {
+    const fetched = await fetchPaths(['ip/firewall/layer7-protocol']);
+    const matchers = list(toTables(fetched), 'ip/firewall/layer7-protocol').map((row) => String(row.name ?? ''));
+    if (matchers.length && !matchers.includes(matcher)) {
+      return fail(res, 400, 'validation', `No layer7 matcher named "${matcher}" on the device — create it first.`);
+    }
+
+    const row = await restWrite(conn, 'ip/firewall/mangle', {
+      chain,
+      action: 'mark-packet',
+      'new-packet-mark': body.mark ? String(body.mark) : matcher,
+      'layer7-protocol': matcher,
+      ...(body.srcAddress ? { 'src-address': String(body.srcAddress) } : {}),
+      ...(body.dstAddress ? { 'dst-address': String(body.dstAddress) } : {}),
+      ...(body.passthrough === false ? { passthrough: false } : {}),
+      comment: body.comment ? String(body.comment) : `l7 ${matcher} (dashboard)`,
+    });
+    ok(res, { created: true, row, mode: analyticsMode() });
+  } catch (err) {
+    sendError(res, err);
+  }
+});
+
+/**
+ * Starts or stops a sniffer capture. Capture-to-file is the only on-box payload
+ * path; the resulting pcap has to be pulled off the device over SCP/FTP because the
+ * REST API does not stream binary files.
+ */
+router.post('/traffic/sniffer', async (req, res) => {
+  const conn = getActiveConnection();
+  if (!conn) return fail(res, 400, 'validation', 'No device connection configured.');
+  const body = (req.body ?? {}) as Row;
+  const running = body.running === true || body.running === 'true';
+
+  try {
+    const settings: Row = {};
+    if (body.filter) settings['filter-interface'] = String(body.filter);
+    if (body.file) settings['file-name'] = String(body.file);
+    if (body.duration) settings['file-limit'] = String(body.duration);
+    if (body.onlyHeaders !== undefined) settings['only-headers'] = body.onlyHeaders === true || body.onlyHeaders === 'true';
+
+    if (conn.demo) {
+      // The demo device has no real sniffer: patch the singleton, then keep the
+      // capture list consistent so the UI has something to show.
+      const row = await restWrite(conn, 'tool/sniffer', {
+        running,
+        ...(running ? { 'filter-interface': String(body.filter ?? 'ether1'), 'file-name': String(body.file ?? `capture-${Date.now()}.pcap`) } : {}),
+        ...settings,
+      }, 'PATCH');
+      if (running) {
+        await restWrite(conn, 'file', {
+          name: String(row['file-name'] ?? 'capture.pcap'),
+          size: 1_048_576 + Math.round(Math.random() * 8_000_000),
+          type: 'file',
+        });
+      }
+      return ok(res, { running, row, mode: 'demo', note: 'Demo capture is simulated; no payloads are decoded.' });
+    }
+
+    if (Object.keys(settings).length) await restWrite(conn, 'tool/sniffer', settings, 'PATCH');
+    const response = await rosRequest(conn, running ? 'tool/sniffer/start' : 'tool/sniffer/stop', 'POST', {});
+    ok(res, { running, result: response.data ?? null, mode: 'live' });
+  } catch (err) {
+    sendError(res, err);
+  }
+});
+
+/** Capture files sitting on the device (pcap/pcapng), newest first. */
+router.get('/traffic/captures', async (_req, res) => {
+  const conn = getActiveConnection();
+  if (!conn) return fail(res, 400, 'validation', 'No device connection configured.');
+  try {
+    const fetched = await fetchPaths(['file']);
+    const files = list(toTables(fetched), 'file')
+      .map((row) => ({ name: String(row.name ?? ''), size: Number(row.size ?? 0), type: String(row.type ?? 'file') }))
+      .filter((file) => /\.pcapn?g?$/i.test(file.name) || /\.cap$/i.test(file.name))
+      .sort((a, b) => b.size - a.size);
+    ok(res, {
+      files,
+      mode: analyticsMode(),
+      // REST returns JSON only, so the dashboard cannot proxy a binary download.
+      downloadHint: 'Pull captures with SCP/FTP (or stream the sniffer straight to a sensor); the REST API cannot transfer binary files.',
+    });
+  } catch (err) {
+    sendError(res, err);
+  }
+});
+
+/* ------------------------------------------------------------------ *
+ * Alerts & scheduled reports
+ * ------------------------------------------------------------------ */
+
+const alertDeviceName = () => getActiveConnection()?.name ?? 'RouterOS device';
+
+/** Builds a bundle the way /insights does, for rule evaluation and reports. */
+const analyseNow = async (includeTraffic: boolean): Promise<InsightBundle> => {
+  const fetched = await fetchPaths(includeTraffic ? [...INSIGHT_PATHS, ...TRAFFIC_PATHS] : [...INSIGHT_PATHS]);
+  return buildInsights(fetched, analyticsMode(), includeTraffic, activeKey());
+};
+
+router.get('/alerts', (_req, res) => {
+  ok(res, { rules: listRules(), events: listEvents(), schedule: getSchedule() });
+});
+
+router.post('/alerts/rules', (req, res) => {
+  try {
+    ok(res, { rule: createRule((req.body ?? {}) as Row) });
+  } catch (err) {
+    fail(res, 400, 'validation', err instanceof Error ? err.message : 'Could not create rule.');
+  }
+});
+
+router.patch('/alerts/rules/:id', (req, res) => {
+  const rule = updateRule(String(req.params.id), (req.body ?? {}) as Row);
+  if (!rule) return fail(res, 404, 'not-found', 'No such rule.');
+  ok(res, { rule });
+});
+
+router.delete('/alerts/rules/:id', (req, res) => {
+  if (!deleteRule(String(req.params.id))) return fail(res, 404, 'not-found', 'No such rule.');
+  ok(res, { deleted: true });
+});
+
+/** Evaluates the rules right now — and returns what fired, without cooldown filtering. */
+router.post('/alerts/check', async (_req, res) => {
+  const conn = getActiveConnection();
+  if (!conn) return fail(res, 400, 'validation', 'No device connection configured.');
+  try {
+    const bundle = await analyseNow(false);
+    const fired = await evaluateAlerts(bundle, { device: conn.name });
+    ok(res, { fired, events: listEvents() });
+  } catch (err) {
+    sendError(res, err);
+  }
+});
+
+router.post('/alerts/events/clear', (_req, res) => {
+  clearEvents();
+  ok(res, { cleared: true });
+});
+
+router.get('/reports/schedule', (_req, res) => ok(res, { schedule: getSchedule(), due: reportDue() }));
+
+router.post('/reports/schedule', (req, res) => ok(res, { schedule: setSchedule((req.body ?? {}) as Row) }));
+
+/** Renders the report now and delivers it to the configured webhook. */
+router.post('/reports/run', async (req, res) => {
+  const conn = getActiveConnection();
+  if (!conn) return fail(res, 400, 'validation', 'No device connection configured.');
+  try {
+    const includeTraffic = req.body?.traffic !== false;
+    const bundle = await analyseNow(includeTraffic);
+    const markdown = insightsReportMarkdown(bundle, {
+      connection: conn.name,
+      mode: analyticsMode(),
+      history: bundle.history ?? readScoreTrend(activeKey()),
+    });
+    const event = await deliverReport(markdown, { device: conn.name, trigger: 'manual' });
+    ok(res, { event, bytes: markdown.length, delivered: event.delivery });
+  } catch (err) {
+    sendError(res, err);
+  }
+});
+
+router.post('/alerts/test-webhook', async (req, res) => {
+  const url = String((req.body ?? {}).url ?? '');
+  if (!/^https?:\/\//.test(url)) return fail(res, 400, 'validation', 'Provide an http(s) webhook URL.');
+  ok(res, { delivery: await testWebhook(url) });
+});
+
+/** Called on a timer: delivers the scheduled report when it is due. */
+export async function runScheduledReports(): Promise<void> {
+  if (!reportDue()) return;
+  try {
+    const bundle = await analyseNow(getSchedule().includeTraffic);
+    const markdown = insightsReportMarkdown(bundle, {
+      connection: alertDeviceName(),
+      mode: analyticsMode(),
+      history: bundle.history ?? readScoreTrend(activeKey()),
+    });
+    await deliverReport(markdown, { device: alertDeviceName(), trigger: 'schedule' });
+    pushLog('system,info', 'scheduled network health report generated');
+  } catch (err) {
+    pushLog('system,error', `scheduled report failed: ${err instanceof Error ? err.message : 'unknown error'}`);
+  }
+}
+
+/** Throughput series for one interface, for the map's link drill-down. */
+router.get('/topology/link-history', (req, res) => {
+  const iface = String(req.query.interface ?? '').trim();
+  if (!iface) return fail(res, 400, 'validation', 'Provide ?interface=<name>.');
+  const hours = Math.min(168, Math.max(1, Number(req.query.hours ?? 6) || 6));
+  ok(res, readLinkHistory(activeKey(), iface, hours));
 });
 
 /** Score history without touching the device — cheap enough for a dashboard poll. */

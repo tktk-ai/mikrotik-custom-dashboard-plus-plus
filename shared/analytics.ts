@@ -62,6 +62,8 @@ export interface TopoNode {
   status: 'up' | 'down' | 'warn';
   bytes?: number;
   utilisation?: number;
+  /** Current throughput, when the node maps to an interface. */
+  rate?: { rx: number; tx: number };
   clients?: number;
   devices?: DeviceRecord[];
   meta?: Row;
@@ -323,6 +325,86 @@ export interface ScoreTrend {
   direction: 'up' | 'down' | 'flat';
   components: Array<{ id: string; label: string; now: number; before: number; delta: number }>;
   newFindings: number;
+}
+
+/* ------------------------------ alerting ------------------------------ */
+
+export type AlertRuleType = 'score-below' | 'severity-count' | 'new-findings';
+
+export interface AlertRule {
+  id: string;
+  name: string;
+  enabled: boolean;
+  type: AlertRuleType;
+  /** Used by `severity-count`: count findings at this severity or worse. */
+  severity?: Severity;
+  /** Score (score-below) or count (severity-count / new-findings). */
+  threshold: number;
+  channel: 'log' | 'webhook';
+  url?: string;
+  cooldownMinutes: number;
+  createdAt: number;
+  lastTriggeredAt?: number;
+}
+
+export interface AlertEvent {
+  id: string;
+  at: number;
+  ruleId: string;
+  ruleName: string;
+  severity: Severity;
+  message: string;
+  value: number | string;
+  delivery: 'logged' | 'webhook-ok' | 'webhook-failed';
+}
+
+export interface ReportSchedule {
+  enabled: boolean;
+  everyHours: number;
+  lastRunAt?: number;
+  webhookUrl?: string;
+  includeTraffic: boolean;
+}
+
+/** One host's answer to a sweep probe. */
+export interface SweepResult {
+  ip: string;
+  name?: string;
+  mac?: string;
+  vendor?: string;
+  kind?: string;
+  link?: string;
+  reachable: boolean;
+  rttMs: number | null;
+  /** `ping` = answered ICMP; `arp` = known to the device but not answering directly. */
+  method: 'ping' | 'arp';
+  /** Conversations conntrack has observed for this address (passive, not a port scan). */
+  flows?: number;
+  bytes?: number;
+  topService?: string;
+  error?: string;
+}
+
+export interface SweepSummary {
+  scope: string;
+  total: number;
+  reachable: number;
+  unreachable: number;
+  averageRttMs: number | null;
+  status: 'running' | 'complete' | 'error';
+  elapsedMs: number;
+  observedTraffic: string;
+  results: SweepResult[];
+}
+
+/** Throughput series for one interface, derived from successive counter reads. */
+export interface LinkHistory {
+  interface: string;
+  hours: number;
+  points: Array<{ at: number; rx: number; tx: number }>;
+  peak: number;
+  average: number;
+  source: 'demo' | 'live';
 }
 
 export interface InsightBundle {
