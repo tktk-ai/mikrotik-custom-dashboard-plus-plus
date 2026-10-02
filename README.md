@@ -44,6 +44,25 @@ without any hardware.
   highlighting.
 - **Device probing** — select any host and probe it on demand: ICMP, DNS/PTR, DHCP lease detail, DHCPv6, vendor and
   platform identification, plus the evidence trail (which of the eleven discovery sources produced the record).
+- **Bulk subnet sweep** — "Sweep" on the inventory (or on any subnet row of the map, via `/devices?sweep=<cidr>`)
+  streams a ping probe over every address the router knows about: a live progress bar, per-host RTT and result rows
+  as they land, and a summary of answered vs silent. Next to each host are the flow counts conntrack has *observed*,
+  labelled as such — the router exposes no REST port scanner, and the panel says so instead of inventing one.
+- **Deep-inspection tooling (within REST limits)** — create `layer7-protocol` matchers and the mangle rules that mark
+  them from the traffic page, start/stop the sniffer with a filter/interface and pcap filename, and list the capture
+  files on the device — with an explicit note that the pcap itself is pulled over SCP/FTP, because REST cannot carry
+  binary files. The page also lays out the real paths to payload visibility (mirror port + external sensor,
+  `tool/sniffer` streaming, Traffic Flow/IPFIX export).
+- **Threshold alerts with webhook delivery** — rules on the health score, on finding counts by severity, or on *new*
+  findings, each with a cooldown and a channel: logged in the dashboard, or POSTed as JSON to any webhook
+  (Slack/Discord/ntfy/Teams all accept the shape). The delivery log shows every fired event with its payload status,
+  "Check now" evaluates on demand, and "Test webhook" proves the URL before you rely on it.
+- **Scheduled reports** — point the scheduler at a webhook and it renders the full Markdown audit report on an
+  hourly-to-daily cadence (`POST /api/reports/run` for one-off), so the network's health lands in the team channel
+  without anyone opening the dashboard. Reports are also downloadable straight from the insights page.
+- **Map polish** — export the topology as SVG or PNG, drag a node to pin it (positions persist in the browser) and
+  reset with one click, and click any link for utilisation history: peak, average and a sparkline built from the
+  server-side throughput series that every analytics read records.
 - **Traffic & flow analytics** — application classes, protocol mix, top ports, top talkers and every tracked
   conversation with byte counts, rates and duration, driven by `/ip/firewall/connection` and the mangle/queue
   counters your router already keeps.
@@ -131,6 +150,12 @@ scripts/gen-icons.mjs Regenerates the tree-shakeable lucide icon registry after 
 | `GET /api/insights/history` | persisted score series with per-component deltas (device is not touched) |
 | `GET /api/insights/report` | Markdown/JSON audit report of the current analysis (`?traffic=true`, `?download=true`) |
 | `GET /api/topology` | layered node/link map, segment stats, discovery sources |
+| `GET /api/topology/link-history` | throughput series per interface (`?interface=ether1&hours=6`) for map drill-down |
+| `GET /api/devices/sweep` | SSE ping sweep over a subnet or the whole LAN, with observed-flow counts per host |
+| `POST /api/traffic/l7` · `POST /api/traffic/mangle` | create layer7 matchers and the mangle rules that mark them |
+| `GET/POST /api/traffic/sniffer` · `GET /api/traffic/captures` | sniffer control and capture-file listing (pcap via SCP/FTP) |
+| `GET/POST/DELETE /api/alerts*` · `POST /api/alerts/check` | alert rules, delivery log, evaluation and webhook test |
+| `GET/POST /api/reports/schedule` · `POST /api/reports/run` | scheduled Markdown reports and one-off runs |
 | `GET /api/traffic` | application classes, protocol mix, talkers, conversations, DPI capability report |
 | `GET /api/device/:ip` | single-host probe: ping, PTR, lease, vendor, platform and evidence |
 | `GET /api/stream` | SSE metrics feed |
@@ -146,7 +171,7 @@ scripts/gen-icons.mjs Regenerates the tree-shakeable lucide icon registry after 
 | `npm run build` | Production bundle into `dist/` |
 | `npm start` / `npm run serve` | Serve API + built UI (serve = build then start) |
 | `npm run typecheck` | `tsc --noEmit` over server, shared, scripts and UI |
-| `npm run smoke` | Renders the real app inside jsdom across 31 routes, 5 click-through interactions and 5 API checks against the running API, asserting live data and zero console errors (needs `npm run dev:api`) |
+| `npm run smoke` | Renders the real app inside jsdom across 31 routes, 8 click-through interactions and 10 API checks against the running API, asserting live data and zero console errors (needs `npm run dev:api`) |
 | `node scripts/gen-icons.mjs` | Rebuild `src/components/iconRegistry.tsx` (explicit icon imports — keeps the main bundle ~124 kB gzipped instead of ~250 kB) |
 
 ## Verification
@@ -158,9 +183,9 @@ npm run smoke       # needs the API running: npm run dev:api (demo device is fin
 ```
 
 The smoke test boots the actual `App` (shell, router, lazy pages, react-query) in jsdom, visits 31 routes — every
-page type, the analytics pages, plus list, singleton, command and unknown-menu endpoints — then clicks through five
-real interactions (DPI tab, IPAM tab, change tracking, subnet table, device link filter). It fails if a route paints
-no data, hits an error state, or logs a console error/warning:
+page type, the analytics pages, plus list, singleton, command and unknown-menu endpoints — then clicks through eight
+real interactions (DPI tab, IPAM tab, change tracking, alerts tab, sweep drawer, DPI matcher wizard, subnet table,
+device link filter). It fails if a route paints no data, hits an error state, or logs a console error/warning:
 
 ```
 [ ok ] /                           6762 chars
@@ -169,8 +194,10 @@ no data, hits an error state, or logs a console error/warning:
 [ ok ] /insights                    6587 chars
 [ ok ] /traffic                     4977 chars
 ...
-[ ok ] api report (markdown)        7.4 kB
-41/41 checks passed (31 routes, 5 interactions, 5 API).
+[ ok ] api report (markdown)        7.7 kB
+[ ok ] api device sweep (SSE)       1.9 kB
+[ ok ] api alerts                   0.1 kB
+49/49 checks passed (31 routes, 8 interactions, 10 API).
 ```
 
 ## Security notes
@@ -196,3 +223,6 @@ no data, hits an error state, or logs a console error/warning:
   real paths to payload visibility — port mirroring or `tool/sniffer` streaming into an external sensor (the demo
   models an `ntopng` container on a mirror port), `/tool/torch` for interactivity, and Traffic Flow/IPFIX export.
   Nothing in this dashboard claims to decode application payloads by itself.
+- **The subnet sweep reports reachability, not open ports.** RouterOS has no REST port scanner, so the sweep pings each
+  known address through the router and shows the flows conntrack has already observed for it (`tcp/443`, …) — a
+  passive signal, clearly labelled, never a scan.

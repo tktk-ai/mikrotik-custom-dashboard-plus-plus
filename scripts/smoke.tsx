@@ -44,23 +44,26 @@ const ROUTES: Expectation[] = [
   { route: '/m/mpls/ldp', expect: [] },
   { route: '/m/this/does/not/exist', expect: ['No menu named'] },
   // analytics pages
-  { route: '/topology', expect: ['Network map', 'Devices', 'Legend'] },
-  { route: '/devices', expect: ['Devices', 'Vendors'] },
-  { route: '/insights', expect: ['Insights', 'Score breakdown', 'Score history'] },
+  { route: '/topology', expect: ['Network map', 'Devices', 'Legend', 'click a link for throughput'] },
+  { route: '/devices', expect: ['Devices', 'Vendors', 'Sweep'] },
+  { route: '/insights', expect: ['Insights', 'Score breakdown', 'Score history', 'Alerts'] },
   { route: '/traffic', expect: ['Traffic', 'Application classes', 'Tracked flows'] },
 ];
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /** Clickable checks: render a page, click something, assert the result appears. */
-const INTERACTIONS: Array<{ route: string; click: string; expect: Array<string | string[]>; note: string }> = [
-  { route: '/traffic', click: 'Deep inspection', expect: ['Ways to get deeper visibility', 'not over REST'], note: 'DPI tab' },
-  { route: '/insights', click: 'Address space', expect: ['Addresses in use', 'DHCP pool'], note: 'IPAM tab' },
+const INTERACTIONS: Array<{ route: string; clicks: string[]; expect: Array<string | string[]>; note: string }> = [
+  { route: '/traffic', clicks: ['Deep inspection'], expect: ['Ways to get deeper visibility', 'not over REST'], note: 'DPI tab' },
+  { route: '/insights', clicks: ['Address space'], expect: ['Addresses in use', 'DHCP pool'], note: 'IPAM tab' },
   // The first insights read only establishes a baseline; later reads diff against it,
   // so accept either state here.
-  { route: '/insights', click: 'Changes', expect: [['Baseline recorded', 'Changed sections', 'configuration drift']], note: 'change tracking tab' },
-  { route: '/topology', click: 'Subnets', expect: ['Gateway', 'Utilisation'], note: 'segment table' },
-  { route: '/devices', click: 'Wi-Fi', expect: ['Wireless'], note: 'link filter' },
+  { route: '/insights', clicks: ['Changes'], expect: [['Baseline recorded', 'Changed sections', 'configuration drift']], note: 'change tracking tab' },
+  { route: '/topology', clicks: ['Subnets'], expect: ['Gateway', 'Utilisation'], note: 'segment table' },
+  { route: '/devices', clicks: ['Wi-Fi'], expect: ['Wireless'], note: 'link filter' },
+  { route: '/insights', clicks: ['Alerts'], expect: ['Alert rules', 'Scheduled report', 'Delivery log'], note: 'alerts tab' },
+  { route: '/traffic', clicks: ['Deep inspection', 'New matcher'], expect: ['New Layer 7 matcher', 'Also add a mangle rule'], note: 'DPI matcher wizard' },
+  { route: '/devices', clicks: ['Sweep'], expect: ['Bulk device sweep', 'ICMP reachability', 'not a port scan'], note: 'sweep drawer' },
 ];
 
 async function main() {
@@ -186,24 +189,37 @@ async function main() {
     );
     await sleep(1500);
 
-    const target = [...host.querySelectorAll('button, a, [role="tab"]')].find((el) =>
-      (el.textContent ?? '').trim().toLowerCase().includes(check.click.toLowerCase()));
-    if (!target) {
-      failures.push(`${check.route} → ${check.click}`);
-      realError(`[FAIL] ${check.note.padEnd(22)} could not find control "${check.click}" on ${check.route}`);
-    } else {
+    /** Prefer an exact label match (a sidebar link saying "DHCP Alerts" must not win). */
+    const findControl = (label: string) => {
+      const wanted = label.toLowerCase();
+      // Portalled dialogs live outside the route container, so search the body.
+      const all = [...w.document.body.querySelectorAll('button, a, [role="tab"]')];
+      return all.find((el) => (el.textContent ?? '').trim().toLowerCase() === wanted)
+        ?? all.find((el) => (el.textContent ?? '').trim().toLowerCase().includes(wanted));
+    };
+
+    let missingControl: string | null = null;
+    for (const label of check.clicks) {
+      const target = findControl(label);
+      if (!target) { missingControl = label; break; }
       target.dispatchEvent(new w.MouseEvent('click', { bubbles: true, cancelable: true }));
-      await sleep(700);
-      const text = (host.textContent ?? '').replace(/\s+/g, ' ');
+      await sleep(600);
+    }
+
+    if (missingControl) {
+      failures.push(`${check.route} → ${check.clicks.join(' → ')}`);
+      realError(`[FAIL] ${check.note.padEnd(22)} could not find control "${missingControl}" on ${check.route}`);
+    } else {
+      const text = (w.document.body.textContent ?? '').replace(/\s+/g, ' ');
       const missing = check.expect
         .map((option) => (Array.isArray(option) ? option.find((needle) => text.includes(needle)) : text.includes(option) ? option : undefined))
         .filter((found) => found === undefined);
       if (missing.length || errors.length) {
-        failures.push(`${check.route} → ${check.click}`);
+        failures.push(`${check.route} → ${check.clicks.join(' → ')}`);
         realError(`[FAIL] ${check.note.padEnd(22)} missing=${JSON.stringify(missing)} errors=${errors.length}`);
         for (const e of errors.slice(0, 2)) realError(`       console: ${e.split('\n')[0].slice(0, 180)}`);
       } else {
-        realError(`[ ok ] ${check.note.padEnd(22)} ${check.route} → "${check.click}"`);
+        realError(`[ ok ] ${check.note.padEnd(22)} ${check.route} → "${check.clicks.join(' → ')}"`);
       }
     }
 
@@ -220,6 +236,12 @@ async function main() {
     { name: 'score history', path: '/api/insights/history', expect: ['"samples"', '"overall"'] },
     { name: 'topology devices', path: '/api/topology', expect: ['"nodes"', '"stats"'] },
     { name: 'traffic flows', path: '/api/traffic', expect: ['"totalFlows"', '"payloadInspection":false'] },
+    { name: 'capture files', path: '/api/traffic/captures', expect: ['"files"', 'SCP'] },
+    { name: 'alert store', path: '/api/alerts', expect: ['"rules"', '"schedule"'] },
+    { name: 'report schedule', path: '/api/reports/schedule', expect: ['"everyHours"', '"due"'] },
+    { name: 'link history', path: '/api/topology/link-history?interface=ether1', expect: ['"points"', '"peak"'] },
+    // The sweep is SSE: a small limit keeps the check quick but still proves the stream.
+    { name: 'device sweep (SSE)', path: '/api/devices/sweep?scope=all&limit=5', expect: ['event: start', 'event: result', 'event: done'] },
   ];
   realError('');
   for (const check of API_CHECKS) {
