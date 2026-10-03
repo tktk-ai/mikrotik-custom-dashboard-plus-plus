@@ -52,6 +52,9 @@ app.use('/api', (req, res, next) => {
   const key = `${req.ip}:${req.method === 'GET' ? 'read' : 'write'}`;
   const limit = req.method === 'GET' ? 240 : 60;
   const current = requestWindows.get(key);
+  if (requestWindows.size > 10000) {
+    for (const [entryKey, entry] of requestWindows) if (now - entry.started >= 60_000) requestWindows.delete(entryKey);
+  }
   if (!current || now - current.started >= 60_000) requestWindows.set(key, { started: now, count: 1 });
   else if (++current.count > limit) {
     res.setHeader('Retry-After', '60');

@@ -93,6 +93,12 @@ const fail = (res: Response, status: number, kind: string, message: string, hint
 
 /* ------------------------------ meta ------------------------------ */
 
+router.get('/health/live', (_req, res) => res.json({ data: { ok: true, uptime: process.uptime(), ts: Date.now() } }));
+router.get('/health/ready', (_req, res) => {
+  const conn = getActiveConnection();
+  if (!conn) return fail(res, 503, 'notready', 'No active RouterOS connection.');
+  res.json({ data: { ok: true, mode: conn.demo ? 'demo' : 'live', connectionId: conn.id } });
+});
 router.get('/health', (_req, res) => {
   const conn = getActiveConnection();
   ok(res, {

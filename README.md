@@ -145,6 +145,7 @@ scripts/gen-icons.mjs Regenerates the tree-shakeable lucide icon registry after 
 | Path | API |
 | --- | --- |
 | `GET /api/health` | mode, active connection, endpoint count, uptime |
+| `GET /api/health/live` · `GET /api/health/ready` | liveness and readiness probes for LAN service supervisors |
 | `GET/POST/PATCH/DELETE /api/connections` | profile CRUD, `:id/activate`, `:id/test` |
 | `GET /api/capabilities` · `POST …/refresh` | probe results per menu path |
 | `GET /api/dashboard` | metrics bundle for the overview page |
