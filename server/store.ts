@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { atomicWriteJson } from './persistence';
 import type { Row } from '../shared/types';
 
 /** Connection profiles (persisted to data/connections.json) plus the demo connection. */
@@ -73,8 +74,7 @@ function load(): void {
 
 function persist(): void {
   try {
-    fs.mkdirSync(DATA_DIR, { recursive: true });
-    fs.writeFileSync(FILE, JSON.stringify(state, null, 2), { mode: 0o600 });
+    atomicWriteJson(FILE, state);
   } catch (err) {
     console.warn('[connections] could not save profiles:', (err as Error).message);
   }

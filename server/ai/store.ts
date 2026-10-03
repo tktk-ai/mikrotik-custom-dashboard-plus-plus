@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { atomicWriteJson } from '../persistence';
 import type { ChangePlan, Investigation, PlannedAction, RiskLevel } from '../../shared/ai';
 
 const dir = process.env.DATA_DIR || path.resolve(process.cwd(), 'data');
@@ -18,8 +19,7 @@ function load(): State {
 }
 function save() {
   const current = load();
-  fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(file, JSON.stringify(current, null, 2), { mode: 0o600 });
+  atomicWriteJson(file, current);
 }
 const id = (prefix: string) => `${prefix}-${crypto.randomBytes(8).toString('hex')}`;
 
