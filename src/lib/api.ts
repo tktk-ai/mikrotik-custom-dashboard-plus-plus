@@ -175,6 +175,11 @@ export const api = {
   /** Relative URL for the Markdown report — used as a download link. */
   reportUrl: (download = true) => `/api/insights/report?format=md&traffic=true${download ? '&download=true' : ''}`,
   resetDemo: () => request<{ reset: boolean }>('/api/demo/reset', { method: 'POST' }),
+
+  aiPlans: () => request<{ plans: Row[] }>('/api/ai/plans'),
+  transitionPlan: (id: string, status: string) => request<Row>(`/api/ai/plans/${encodeURIComponent(id)}/transition`, { method: 'POST', body: JSON.stringify({ status }) }),
+  applyPlan: (id: string) => request<Row>(`/api/ai/plans/${encodeURIComponent(id)}/apply`, { method: 'POST', body: JSON.stringify({}) }),
+  createHotspotBypassPlan: (body: { address?: string; macAddress?: string; server: string; reason: string }) => request<Row>('/api/hotspot/bypass/plan', { method: 'POST', body: JSON.stringify(body) }),
 };
 
 /** Server-sent metrics stream (demo device). Falls back silently when unavailable. */

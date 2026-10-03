@@ -1,7 +1,9 @@
 import express from 'express';
 import fs from 'node:fs';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import api, { runScheduledReports } from './api';
+import { audit } from './audit';
 
 /**
  * RouterOS Control Plane server.
@@ -20,12 +22,64 @@ const HOST = process.env.HOST || '0.0.0.0';
 const DIST = path.resolve(process.cwd(), 'dist');
 
 app.disable('x-powered-by');
+
+// Optional API-key protection for deployments that do not already sit behind an
+// authenticated reverse proxy. It is deliberately opt-in so the built-in demo
+// remains frictionless, while production operators can fail closed by setting
+// DASHBOARD_API_KEY.
+const dashboardApiKey = process.env.DASHBOARD_API_KEY?.trim();
+if (process.env.NODE_ENV === 'production' && !dashboardApiKey) {
+  throw new Error('DASHBOARD_API_KEY is required in production. Put the API behind OIDC or a trusted authenticated reverse proxy.');
+}
+if (dashboardApiKey) {
+  app.use('/api', (req, res, next) => {
+    const supplied = String(req.headers['x-api-key'] ?? '').trim()
+      || String(req.headers.authorization ?? '').replace(/^Bearer\\s+/i, '').trim();
+    if (!supplied || supplied !== dashboardApiKey) {
+      res.status(401).json({ error: { kind: 'auth', message: 'Dashboard authentication required.' } });
+      return;
+    }
+    next();
+  });
+}
+
+// Lightweight process-local protection for expensive or mutating API calls.
+// This is not a replacement for a gateway rate limiter, but prevents accidental
+// request storms and is useful in single-process deployments.
+const requestWindows = new Map<string, { started: number; count: number }>();
+app.use('/api', (req, res, next) => {
+  const now = Date.now();
+  const key = `${req.ip}:${req.method === 'GET' ? 'read' : 'write'}`;
+  const limit = req.method === 'GET' ? 240 : 60;
+  const current = requestWindows.get(key);
+  if (requestWindows.size > 10000) {
+    for (const [entryKey, entry] of requestWindows) if (now - entry.started >= 60_000) requestWindows.delete(entryKey);
+  }
+  if (!current || now - current.started >= 60_000) requestWindows.set(key, { started: now, count: 1 });
+  else if (++current.count > limit) {
+    res.setHeader('Retry-After', '60');
+    res.status(429).json({ error: { kind: 'rate_limit', message: 'Too many requests; retry shortly.' } });
+    return;
+  }
+  next();
+});
+
 app.use(express.json({ limit: '8mb' }));
 app.use(express.urlencoded({ extended: true, limit: '2mb' }));
 
 app.use((req, res, next) => {
+  const requestId = String(req.headers['x-request-id'] ?? crypto.randomUUID()).slice(0, 128);
+  res.setHeader('X-Request-ID', requestId);
   res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('Referrer-Policy', 'no-referrer');
+  res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
   if (req.path.startsWith('/api')) res.setHeader('Cache-Control', 'no-store');
+  res.on('finish', () => {
+    if (req.path.startsWith('/api') && !['GET', 'HEAD', 'OPTIONS'].includes(req.method)) {
+      audit({ method: req.method, path: req.path, status: res.statusCode, actor: String(req.headers['x-actor-id'] ?? 'api-client'), agent: String(req.headers['x-agent-id'] ?? '') || undefined, ip: req.ip, requestId });
+    }
+  });
   next();
 });
 

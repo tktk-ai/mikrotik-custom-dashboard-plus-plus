@@ -31,6 +31,7 @@ export interface RosResponse {
 }
 
 const timeoutMs = Number(process.env.ROS_TIMEOUT_MS || 15000);
+const maxResponseBytes = Number(process.env.ROS_MAX_RESPONSE_BYTES || 16 * 1024 * 1024);
 
 export function rosRequest(
   target: RosTarget,
@@ -69,7 +70,15 @@ export function rosRequest(
     const transport = isTls ? https : http;
     const req = transport.request(options, (res) => {
       const chunks: Buffer[] = [];
-      res.on('data', (c) => chunks.push(c as Buffer));
+      let received = 0;
+      res.on('data', (c) => {
+        received += Buffer.byteLength(c);
+        if (received > maxResponseBytes) {
+          req.destroy(new RosError('device', `RouterOS response exceeded the ${Math.round(maxResponseBytes / 1024 / 1024)} MiB safety limit.`, 413));
+          return;
+        }
+        chunks.push(c as Buffer);
+      });
       res.on('end', () => {
         const text = Buffer.concat(chunks).toString('utf8');
         const ms = Date.now() - started;

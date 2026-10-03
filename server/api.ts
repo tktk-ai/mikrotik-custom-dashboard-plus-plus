@@ -22,14 +22,70 @@ import { latestLinkRates, readLinkHistory, readScoreTrend, recordInterfaceCounte
 import { insightsReportMarkdown } from './analytics/report';
 import { RosError, normalizeList, rosRequest } from './routeros';
 import { clearCapabilities, getCapabilities, testConnection } from './probe';
+import { handleMcp } from './mcp';
+import { createInvestigation, createPlan, getPlan, listInvestigations, listPlans, transitionPlan } from './ai/store';
 import {
   addConnection, getActiveConnection, getConnection, listConnections, publicConnection,
-  removeConnection, setActiveConnection, updateConnection, type Connection,
+  removeConnection, setActiveConnection, updateConnection, validateRouterTarget, type Connection,
 } from './store';
 
 /** HTTP API consumed by the dashboard UI. */
 
 const router = express.Router();
+
+// Read-only MCP gateway for AI network operations clients. It inherits the
+// optional dashboard API-key middleware mounted by server/index.ts.
+router.post('/mcp', handleMcp);
+
+/* ----------------------- AI workflow safety ----------------------- */
+router.get('/ai/plans', (_req, res) => ok(res, { plans: listPlans() }));
+router.get('/ai/plans/:id', (req, res) => {
+  const plan = getPlan(req.params.id);
+  if (!plan) return fail(res, 404, 'notfound', 'Change plan not found.');
+  ok(res, plan);
+});
+router.post('/ai/plans', (req, res) => {
+  const body = req.body ?? {};
+  if (typeof body.intent !== 'string' || body.intent.trim().length < 5) return fail(res, 400, 'validation', 'A change intent of at least five characters is required.');
+  if (!Array.isArray(body.deviceIds) || body.deviceIds.length === 0) return fail(res, 400, 'validation', 'At least one target device is required.');
+  if (!['low', 'medium', 'high', 'critical'].includes(body.risk)) return fail(res, 400, 'validation', 'A valid risk level is required.');
+  const plan = createPlan({ ...body, deviceIds: body.deviceIds.map(String), createdBy: String(req.headers['x-agent-id'] ?? 'api') });
+  ok(res, plan);
+});
+router.post('/ai/plans/:id/transition', (req, res) => {
+  const status = req.body?.status;
+  if (!['validated', 'waiting_approval', 'approved', 'rejected', 'cancelled'].includes(status)) return fail(res, 400, 'validation', 'Unsupported plan transition.');
+  try {
+    const plan = transitionPlan(req.params.id, status, String(req.headers['x-agent-id'] ?? 'operator'));
+    if (!plan) return fail(res, 404, 'notfound', 'Change plan not found.');
+    ok(res, plan);
+  } catch (err) { return fail(res, 409, 'workflow', err instanceof Error ? err.message : 'Invalid plan transition.'); }
+});
+router.post('/hotspot/bypass/plan', (req, res) => {
+  const body = req.body ?? {};
+  const mac = String(body.macAddress ?? '').trim().toUpperCase();
+  const address = String(body.address ?? '').trim();
+  const server = String(body.server ?? '').trim();
+  const reason = String(body.reason ?? '').trim();
+  if (!/^([0-9A-F]{2}:){5}[0-9A-F]{2}$/.test(mac) && !address) return fail(res, 400, 'validation', 'Provide a verified MAC address or IP address.');
+  if (address && !/^[0-9a-fA-F:.]+$/.test(address)) return fail(res, 400, 'validation', 'Provide a valid IP address.');
+  if (!server || server.length > 128) return fail(res, 400, 'validation', 'A specific hotspot server is required.');
+  if (reason.length < 5 || reason.length > 500) return fail(res, 400, 'validation', 'Provide a reason between 5 and 500 characters.');
+  const plan = createPlan({
+    intent: `Bypass captive portal for ${mac || address} on ${server}`,
+    deviceIds: [getActiveConnection()?.id ?? 'active'], risk: 'medium', createdBy: String(req.headers['x-actor-id'] ?? 'operator'),
+    actions: [{ id: `action-${Date.now()}`, deviceId: getActiveConnection()?.id ?? 'active', operation: 'create', resource: 'ip/hotspot/ip-binding', description: 'Create an expiring or operator-reviewed hotspot bypass binding', parameters: { ...(address ? { address } : {}), ...(mac ? { 'mac-address': mac } : {}), server, type: 'bypassed', comment: reason }, reversible: true }],
+    preconditions: ['Confirm the selected device identity and current MAC/IP association', 'Confirm no conflicting hotspot binding exists'], expectedEffects: ['The selected device bypasses captive portal authentication on the selected server'], verification: ['Binding exists with type bypassed', 'The binding targets the intended MAC/IP and hotspot server'], rollback: ['Remove the created ip/hotspot/ip-binding record'],
+  });
+  ok(res, plan);
+});
+router.get('/ai/investigations', (_req, res) => ok(res, { investigations: listInvestigations() }));
+router.post('/ai/investigations', (req, res) => {
+  const body = req.body ?? {};
+  if (typeof body.title !== 'string' || typeof body.goal !== 'string') return fail(res, 400, 'validation', 'Title and goal are required.');
+  if (!Array.isArray(body.deviceIds) || body.deviceIds.length === 0) return fail(res, 400, 'validation', 'At least one target device is required.');
+  ok(res, createInvestigation({ title: body.title, goal: body.goal, deviceIds: body.deviceIds.map(String), createdBy: String(req.headers['x-agent-id'] ?? 'api') }));
+});
 
 const ok = (res: Response, data: unknown) => res.json({ data });
 const fail = (res: Response, status: number, kind: string, message: string, hint?: string, detail?: unknown) =>
@@ -37,6 +93,12 @@ const fail = (res: Response, status: number, kind: string, message: string, hint
 
 /* ------------------------------ meta ------------------------------ */
 
+router.get('/health/live', (_req, res) => res.json({ data: { ok: true, uptime: process.uptime(), ts: Date.now() } }));
+router.get('/health/ready', (_req, res) => {
+  const conn = getActiveConnection();
+  if (!conn) return fail(res, 503, 'notready', 'No active RouterOS connection.');
+  res.json({ data: { ok: true, mode: conn.demo ? 'demo' : 'live', connectionId: conn.id } });
+});
 router.get('/health', (_req, res) => {
   const conn = getActiveConnection();
   ok(res, {
@@ -59,8 +121,11 @@ router.get('/connections', (_req, res) => {
 
 router.post('/connections', async (req, res) => {
   const body = req.body ?? {};
-  if (!body.host) return fail(res, 400, 'validation', 'A host or IP address is required.');
-  let conn = addConnection(body as Partial<Connection>);
+  const targetError = validateRouterTarget(String(body.host ?? ''));
+  if (targetError) return fail(res, 400, 'validation', targetError);
+  const port = Number(body.port ?? (body.scheme === 'http' ? 80 : 443));
+  if (!Number.isInteger(port) || port < 1 || port > 65535) return fail(res, 400, 'validation', 'Port must be an integer between 1 and 65535.');
+  let conn = addConnection({ ...body, port } as Partial<Connection>);
   if (body.test !== false && !conn.demo) {
     const result = await testConnection(conn);
     clearCapabilities();
@@ -71,7 +136,15 @@ router.post('/connections', async (req, res) => {
 });
 
 router.patch('/connections/:id', (req, res) => {
-  const updated = updateConnection(req.params.id, req.body ?? {});
+  const patch = req.body ?? {};
+  if (patch.host !== undefined) {
+    const targetError = validateRouterTarget(String(patch.host));
+    if (targetError) return fail(res, 400, 'validation', targetError);
+  }
+  if (patch.port !== undefined && (!Number.isInteger(Number(patch.port)) || Number(patch.port) < 1 || Number(patch.port) > 65535)) {
+    return fail(res, 400, 'validation', 'Port must be an integer between 1 and 65535.');
+  }
+  const updated = updateConnection(req.params.id, patch);
   if (!updated) return fail(res, 404, 'notfound', 'Connection not found.');
   clearCapabilities();
   ok(res, publicConnection(updated));
@@ -334,6 +407,33 @@ const restWrite = async (conn: NonNullable<ReturnType<typeof getActiveConnection
 };
 
 const NAME_RE = /^[A-Za-z0-9._-]{1,63}$/;
+
+/** Applies only an approved, typed hotspot bypass plan. No arbitrary script execution. */
+router.post('/ai/plans/:id/apply', async (req, res) => {
+  const plan = getPlan(req.params.id);
+  if (!plan) return fail(res, 404, 'notfound', 'Change plan not found.');
+  if (plan.status !== 'approved') return fail(res, 409, 'workflow', 'Only approved plans can be applied.');
+  if (plan.expiresAt < Date.now()) return fail(res, 409, 'workflow', 'This plan has expired and must be recreated.');
+  const action = plan.actions[0];
+  const conn = getActiveConnection();
+  if (!conn || !action || action.resource !== 'ip/hotspot/ip-binding' || action.operation !== 'create') return fail(res, 400, 'validation', 'Only typed hotspot bypass plans are supported by this executor.');
+  const params = action.parameters;
+  try {
+    const row = await restWrite(conn, action.resource, params, 'POST');
+    // Verify using the device state rather than trusting the write response.
+    const observed = conn.demo
+      ? handleDemo({ method: 'GET', path: action.resource, body: {}, query: new URLSearchParams() })
+      : (await rosRequest(conn, action.resource, 'GET')).data;
+    const rows = Array.isArray(observed) ? observed : [observed];
+    const verified = rows.some((item) => String(item?.type ?? '') === 'bypassed'
+      && (!params.address || String(item?.address ?? '') === String(params.address))
+      && (!params['mac-address'] || String(item?.['mac-address'] ?? '').toUpperCase() === String(params['mac-address']).toUpperCase())
+      && (!params.server || String(item?.server ?? '') === String(params.server)));
+    if (!verified) return fail(res, 502, 'verification', 'RouterOS accepted the request but the hotspot bypass could not be verified.');
+    transitionPlan(plan.id, 'applied', String(req.headers['x-actor-id'] ?? 'operator'));
+    ok(res, { applied: true, verified: true, row, plan: getPlan(plan.id) });
+  } catch (err) { sendError(res, err); }
+});
 
 /** Creates a layer7 matcher — the closest thing to on-box application detection. */
 router.post('/traffic/l7', async (req, res) => {

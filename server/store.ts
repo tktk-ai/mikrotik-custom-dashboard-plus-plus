@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { atomicWriteJson } from './persistence';
 import type { Row } from '../shared/types';
 
 /** Connection profiles (persisted to data/connections.json) plus the demo connection. */
@@ -22,6 +23,23 @@ export interface Connection extends Row {
 
 const DATA_DIR = process.env.DATA_DIR || path.resolve(process.cwd(), 'data');
 const FILE = path.join(DATA_DIR, 'connections.json');
+
+/** Reject targets that are never valid RouterOS destinations and commonly
+ * indicate SSRF attempts. Private LAN addresses remain allowed because they are
+ * the normal deployment case for RouterOS management. */
+export function validateRouterTarget(host: string): string | null {
+  const value = String(host ?? '').trim();
+  if (!value || value.length > 253) return 'A valid hostname or IP address is required.';
+  const lower = value.toLowerCase().replace(/[\\[\\]]/g, '');
+  if (lower === 'localhost' || lower.endsWith('.localhost') || lower === 'metadata.google.internal') {
+    return 'Loopback and cloud metadata targets are not allowed.';
+  }
+  if (/^(127\\.|0\\.0\\.0\\.0|169\\.254\\.|::1$|fe80:)/i.test(lower)) {
+    return 'Loopback and link-local targets are not allowed.';
+  }
+  if (/[^a-z0-9.:%_-]/i.test(lower)) return 'Host contains unsupported characters.';
+  return null;
+}
 
 interface Persisted { connections: Connection[]; activeId: string | null }
 
@@ -56,8 +74,7 @@ function load(): void {
 
 function persist(): void {
   try {
-    fs.mkdirSync(DATA_DIR, { recursive: true });
-    fs.writeFileSync(FILE, JSON.stringify(state, null, 2), { mode: 0o600 });
+    atomicWriteJson(FILE, state);
   } catch (err) {
     console.warn('[connections] could not save profiles:', (err as Error).message);
   }
@@ -88,7 +105,9 @@ export function addConnection(input: Partial<Connection>, makeActive = true): Co
     scheme: input.scheme === 'http' ? 'http' : 'https',
     username: input.username?.trim() || 'admin',
     password: input.password ?? '',
-    tlsVerify: input.tlsVerify ?? false,
+    // Certificate verification is secure by default. Operators can explicitly
+    // opt out for self-signed RouterOS certificates on isolated networks.
+    tlsVerify: input.tlsVerify ?? true,
     demo,
     createdAt: Date.now(),
     note: input.note,
@@ -104,8 +123,18 @@ export function updateConnection(id: string, patch: Partial<Connection>): Connec
   const conn = getConnection(id);
   if (!conn) return undefined;
   if (patch.password === '••••••••') delete patch.password; // placeholder from the UI
-  Object.assign(conn, patch, { id: conn.id, createdAt: conn.createdAt });
-  conn.port = Number(conn.port) || 443;
+  // Copy only profile fields. Do not allow arbitrary request properties to be
+  // persisted onto the connection object (or later exposed by publicConnection).
+  const allowed = ['name', 'host', 'port', 'scheme', 'username', 'password', 'tlsVerify', 'note'] as const;
+  for (const key of allowed) {
+    if (key in patch) (conn as any)[key] = patch[key];
+  }
+  conn.name = String(conn.name || 'RouterOS device').trim().slice(0, 120);
+  conn.host = String(conn.host || '').trim().slice(0, 253);
+  conn.username = String(conn.username || 'admin').trim().slice(0, 128);
+  conn.note = conn.note ? String(conn.note).slice(0, 500) : undefined;
+  conn.scheme = conn.scheme === 'http' ? 'http' : 'https';
+  conn.port = Math.min(65535, Math.max(1, Number(conn.port) || (conn.scheme === 'http' ? 80 : 443)));
   persist();
   return conn;
 }

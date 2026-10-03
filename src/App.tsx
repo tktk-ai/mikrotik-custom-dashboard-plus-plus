@@ -16,6 +16,7 @@ const Explorer = lazy(() => import('./pages/Explorer'));
 const Connections = lazy(() => import('./pages/Connections'));
 const Console = lazy(() => import('./pages/Console'));
 const Settings = lazy(() => import('./pages/Settings'));
+const Operations = lazy(() => import('./pages/Operations'));
 
 const ScrollToTop: React.FC = () => {
   const { pathname } = useLocation();
@@ -50,6 +51,7 @@ const App: React.FC = () => (
           <Route path="/connections" element={<Connections />} />
           <Route path="/console" element={<Console />} />
           <Route path="/settings" element={<Settings />} />
+          <Route path="/operations" element={<Operations />} />
           <Route path="/dashboard" element={<Navigate to="/" replace />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>

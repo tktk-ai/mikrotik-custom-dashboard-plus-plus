@@ -35,11 +35,23 @@ export const DeviceDrawer: React.FC<{ device: DeviceRecord | null; onClose: () =
     mutationFn: (ip) => api.probeDevice(ip),
     onError: (err) => toast.error('Probe failed', err.message, err.hint),
   });
+  const bypassPlan = useMutation({
+    mutationFn: (input: { address?: string; macAddress?: string; server: string; reason: string }) => api.createHotspotBypassPlan(input),
+    onSuccess: () => toast.success('Bypass plan created', 'Review and approve it in AI Operations.'),
+    onError: (err: Error) => toast.error('Could not create bypass plan', err.message),
+  });
+  const requestBypass = () => {
+    if (!device || !bypassServer.trim() || bypassReason.trim().length < 5) return;
+    bypassPlan.mutate({ address: ip, macAddress: device.mac, server: bypassServer.trim(), reason: bypassReason.trim() }, { onSuccess: () => { setBypassOpen(false); setBypassReason(''); } });
+  };
 
   React.useEffect(() => { probe.reset(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [device?.id]);
 
   const ip = device?.addresses[0] ?? device?.ip;
   const result = probe.data;
+  const [bypassOpen, setBypassOpen] = useState(false);
+  const [bypassServer, setBypassServer] = useState('hotspot-guest');
+  const [bypassReason, setBypassReason] = useState('');
 
   return (
     <Drawer
@@ -59,6 +71,11 @@ export const DeviceDrawer: React.FC<{ device: DeviceRecord | null; onClose: () =
               <Icon name="Radio" size={13} />Ping menu
             </a>
           )}
+          {device?.link === 'wifi' || device?.sources.some((source) => source.includes('hotspot')) ? (
+            <button className="btn btn-sm" disabled={bypassPlan.isPending} onClick={() => setBypassOpen(true)}>
+              {bypassPlan.isPending ? <Spinner className="size-3.5" /> : <Icon name="Unlock" size={13} />}Plan portal bypass
+            </button>
+          ) : null}
           <button className="btn btn-sm btn-ghost ml-auto" onClick={onClose}>Close</button>
         </div>
       }
@@ -102,6 +119,16 @@ export const DeviceDrawer: React.FC<{ device: DeviceRecord | null; onClose: () =
               {device.comment && <li className="flex items-center gap-2"><Icon name="MessageSquare" size={12} />{device.comment}</li>}
             </ul>
           </section>
+
+          {bypassOpen && (
+            <section className="card border-warn/40 p-3">
+              <div className="flex items-center gap-2"><Icon name="ShieldAlert" size={14} className="text-warn" /><span className="text-[13px] font-semibold text-ink">Plan captive-portal bypass</span></div>
+              <p className="mt-1 text-xs text-dim">This creates a reviewable plan; it does not change RouterOS until approved under AI Operations.</p>
+              {device.randomised && <p className="mt-2 text-xs text-warn">Warning: this device uses a randomized MAC. A MAC-based bypass may not persist.</p>}
+              <div className="mt-3 grid gap-3 sm:grid-cols-2"><label className="text-xs text-dim">Hotspot server<input className="input mt-1" value={bypassServer} onChange={(e) => setBypassServer(e.target.value)} placeholder="hotspot-guest" /></label><label className="text-xs text-dim">Reason<input className="input mt-1" value={bypassReason} onChange={(e) => setBypassReason(e.target.value)} placeholder="Approved kiosk" /></label></div>
+              <div className="mt-3 flex gap-2"><button className="btn btn-sm btn-primary" disabled={bypassPlan.isPending || bypassReason.trim().length < 5 || !bypassServer.trim()} onClick={requestBypass}>{bypassPlan.isPending ? <Spinner className="size-3" /> : <Icon name="ClipboardCheck" size={13} />}Create plan</button><button className="btn btn-sm" onClick={() => setBypassOpen(false)}>Cancel</button></div>
+            </section>
+          )}
 
           {result && (
             <section className="card p-3">
