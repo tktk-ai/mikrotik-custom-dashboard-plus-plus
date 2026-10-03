@@ -38,6 +38,16 @@ const tools = [
     inputSchema: { type: 'object', properties: {}, additionalProperties: false },
   },
   {
+    name: 'identify_device',
+    description: 'Build a detailed, evidence-backed identity record for an observed IP address. Read-only.',
+    inputSchema: { type: 'object', required: ['ip'], properties: { ip: { type: 'string' } }, additionalProperties: false },
+  },
+  {
+    name: 'create_hotspot_bypass_plan',
+    description: 'Create an approval-required captive portal bypass plan for a verified device. Does not change RouterOS.',
+    inputSchema: { type: 'object', required: ['deviceId', 'server', 'reason'], properties: { deviceId: { type: 'string' }, address: { type: 'string' }, macAddress: { type: 'string' }, server: { type: 'string' }, reason: { type: 'string' } }, additionalProperties: false },
+  },
+  {
     name: 'create_investigation',
     description: 'Create a durable read-only investigation task. Does not change the device.',
     inputSchema: { type: 'object', required: ['title', 'goal', 'deviceIds'], properties: { title: { type: 'string' }, goal: { type: 'string' }, deviceIds: { type: 'array', items: { type: 'string' } } }, additionalProperties: false },
@@ -74,6 +84,42 @@ async function callTool(name: string, args: Record<string, unknown>) {
       return result({ mode: 'demo', observedAt: new Date().toISOString(), metrics: getMetrics() });
     case 'get_device_capabilities':
       return result(await getCapabilities(args.refresh === true));
+    case 'identify_device': {
+      const ip = String(args.ip ?? '').trim();
+      if (!/^[0-9a-fA-F:.]+$/.test(ip)) return error('A valid IPv4 or IPv6 address is required.');
+      const paths = ['ip/arp', 'ip/dhcp-server/lease', 'ip/neighbor', 'ipv6/neighbor', 'ip/hotspot/active', 'ip/hotspot/ip-binding', 'interface/wifi/registration-table'];
+      const fetched = await fetchPaths(paths);
+      const rows = (path: string) => fetched.get(path)?.rows ?? [];
+      const match = (path: string) => rows(path).filter((r) => String(r.address ?? r['last-ip'] ?? '') === ip);
+      const arp = match('ip/arp');
+      const lease = match('ip/dhcp-server/lease');
+      const neighbor = match('ip/neighbor');
+      const ipv6 = match('ipv6/neighbor');
+      const hotspot = match('ip/hotspot/active');
+      const binding = [...rows('ip/hotspot/ip-binding')].filter((r) => String(r.address ?? '') === ip);
+      const known = [...arp, ...lease, ...neighbor, ...hotspot];
+      const mac = known.map((r) => String(r['mac-address'] ?? '')).find(Boolean);
+      return result({
+        ip, mac, vendor: mac ? (await import('../shared/oui')).vendorForMac(mac) : undefined,
+        randomizedMac: mac ? (await import('../shared/oui')).isRandomisedMac(mac) : false,
+        names: [...new Set(known.map((r) => String(r['host-name'] ?? r.identity ?? r.user ?? '')).filter(Boolean))],
+        interfaces: [...new Set(known.map((r) => String(r.interface ?? '')).filter(Boolean))],
+        platform: neighbor[0]?.platform, board: neighbor[0]?.board, version: neighbor[0]?.version,
+        dhcp: lease[0] ? { state: lease[0].status, server: lease[0].server, expires: lease[0]['expires-after'] } : null,
+        hotspot: { active: hotspot.length > 0, sessions: hotspot, bindings: binding },
+        ipv6: ipv6.map((r) => r.address),
+        evidence: paths.map((path) => ({ path, rows: rows(path).length, matched: match(path).length, ok: fetched.get(path)?.ok ?? false, error: fetched.get(path)?.error })),
+        observedAt: new Date().toISOString(),
+      });
+    }
+    case 'create_hotspot_bypass_plan': {
+      const address = args.address ? String(args.address) : '';
+      const macAddress = args.macAddress ? String(args.macAddress).toUpperCase() : '';
+      if (!String(args.deviceId ?? '') || !String(args.server ?? '') || String(args.reason ?? '').trim().length < 5) return error('deviceId, server, and a reason of at least five characters are required.');
+      if (address && !/^[0-9a-fA-F:.]+$/.test(address)) return error('Invalid device IP address.');
+      if (macAddress && !/^([0-9A-F]{2}:){5}[0-9A-F]{2}$/.test(macAddress)) return error('Invalid device MAC address.');
+      return result(createPlan({ intent: `Bypass captive portal for ${macAddress || address} on ${String(args.server)}`, deviceIds: [String(args.deviceId)], risk: 'medium', createdBy: 'mcp-agent', actions: [{ id: `action-${Date.now()}`, deviceId: String(args.deviceId), operation: 'create', resource: 'ip/hotspot/ip-binding', description: 'Create an approved hotspot bypass binding', parameters: { ...(address ? { address } : {}), ...(macAddress ? { 'mac-address': macAddress } : {}), server: String(args.server), type: 'bypassed', comment: String(args.reason).trim() }, reversible: true }], preconditions: ['Verify device identity and current MAC/IP association', 'Check for conflicting bindings'], expectedEffects: ['The selected device bypasses captive portal authentication on the selected server'], verification: ['Binding exists with type bypassed and expected target'], rollback: ['Remove the created hotspot IP binding'] }));
+    }
     case 'create_investigation':
       if (typeof args.title !== 'string' || typeof args.goal !== 'string' || !Array.isArray(args.deviceIds)) return error('title, goal, and deviceIds are required.');
       return result(createInvestigation({ title: args.title, goal: args.goal, deviceIds: args.deviceIds.map(String), createdBy: 'mcp-agent' }));
