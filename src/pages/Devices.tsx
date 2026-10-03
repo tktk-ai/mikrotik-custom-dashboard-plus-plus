@@ -35,6 +35,19 @@ export const DeviceDrawer: React.FC<{ device: DeviceRecord | null; onClose: () =
     mutationFn: (ip) => api.probeDevice(ip),
     onError: (err) => toast.error('Probe failed', err.message, err.hint),
   });
+  const bypassPlan = useMutation({
+    mutationFn: (input: { address?: string; macAddress?: string; server: string; reason: string }) => api.createHotspotBypassPlan(input),
+    onSuccess: () => toast.success('Bypass plan created', 'Review and approve it in AI Operations.'),
+    onError: (err: Error) => toast.error('Could not create bypass plan', err.message),
+  });
+  const requestBypass = () => {
+    if (!device) return;
+    const server = window.prompt('Hotspot server (required, for example hotspot-guest):', 'hotspot-guest')?.trim();
+    if (!server) return;
+    const reason = window.prompt('Reason for this captive-portal bypass:')?.trim();
+    if (!reason) return;
+    bypassPlan.mutate({ address: ip, macAddress: device.mac, server, reason });
+  };
 
   React.useEffect(() => { probe.reset(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [device?.id]);
 
@@ -59,6 +72,11 @@ export const DeviceDrawer: React.FC<{ device: DeviceRecord | null; onClose: () =
               <Icon name="Radio" size={13} />Ping menu
             </a>
           )}
+          {device?.link === 'wifi' || device?.sources.some((source) => source.includes('hotspot')) ? (
+            <button className="btn btn-sm" disabled={bypassPlan.isPending} onClick={requestBypass}>
+              {bypassPlan.isPending ? <Spinner className="size-3.5" /> : <Icon name="Unlock" size={13} />}Plan portal bypass
+            </button>
+          ) : null}
           <button className="btn btn-sm btn-ghost ml-auto" onClick={onClose}>Close</button>
         </div>
       }
