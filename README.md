@@ -121,9 +121,12 @@ switched back to at any time.
 | `ROUTEROS_PORT` | `443` | REST port |
 | `ROUTEROS_SCHEME` | `https` | `https` (www-ssl) or `http` (www, v7.9+) |
 | `ROUTEROS_USER` / `ROUTEROS_PASSWORD` | `admin` / – | REST credentials |
-| `ROUTEROS_TLS_VERIFY` | `false` | Verify the router certificate |
+| `ROUTEROS_TLS_VERIFY` | `true` | Verify the router certificate; disable only for explicitly trusted self-signed devices |
+| `ROS_MAX_RESPONSE_BYTES` | `16777216` | Maximum RouterOS REST response size before aborting |
 | `ROUTEROS_NAME` | host | Display name for the bootstrapped profile |
 | `ROS_TIMEOUT_MS` | `15000` | Per-request timeout |
+| `ROS_MAX_RESPONSE_BYTES` | `16777216` | Maximum RouterOS REST response size |
+| `DASHBOARD_API_KEY` | – | Optional API key for deployments without an authenticated reverse proxy |
 | `PROBE_TTL_MS` | `300000` | Capability probe cache TTL |
 
 Copy `.env.example` to `.env` (loaded by `tsx`/Vite where applicable) or export the variables in your shell.
@@ -160,6 +163,9 @@ scripts/gen-icons.mjs Regenerates the tree-shakeable lucide icon registry after 
 | `GET /api/device/:ip` | single-host probe: ping, PTR, lease, vendor, platform and evidence |
 | `GET /api/stream` | SSE metrics feed |
 | `ALL /api/ros/*` | transparent proxy to `/rest/*` (query filters forwarded) |
+| `POST /api/mcp` | read-only MCP JSON-RPC gateway plus safe investigation/change-plan tools for AI network operations clients |
+| `GET/POST /api/ai/plans*` | durable draft change plans and explicit human workflow transitions; no RouterOS changes are executed |
+| `GET/POST /api/ai/investigations` | durable read-only investigation task records |
 | `POST /api/console` | run a RouterOS script (`/rest/execute`) |
 | `POST /api/demo/reset` · `GET /api/menus` | demo helpers |
 
@@ -207,7 +213,7 @@ device link filter, map link drill-down). It fails if a route paints no data, hi
 - Router credentials live **server-side only**; the browser talks to `/api/*` and can never read a password.
 - The proxy refuses paths outside the catalog and forwards filters as-is; all responses are `Cache-Control: no-store`.
 - Profiles are written with `0600` permissions and `data/` is git-ignored.
-- TLS verification is **on** by default; disable it per profile only for self-signed router certificates.
+- TLS verification is **on** by default; disable it per profile only for explicitly trusted self-signed router certificates. RouterOS response bodies are capped by `ROS_MAX_RESPONSE_BYTES` to prevent oversized responses from exhausting server memory.
 - The dashboard is not an authenticator: put it behind your own VPN/reverse proxy and use a dedicated
   least-privilege RouterOS user (a read-only group if you only need monitoring).
 
